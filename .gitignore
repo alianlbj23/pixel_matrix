@@ -1,0 +1,11 @@
+# ESP-IDF build output and downloaded components (re-created from dependencies.lock)
+build/
+managed_components/
+sdkconfig.old
+
+# Editor / machine-specific settings
+.vscode/
+
+# Python
+__pycache__/
+*.pyc

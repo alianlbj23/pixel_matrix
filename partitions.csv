@@ -1,0 +1,7 @@
+# pixel-board partition table (uses the first 16 MB of the 32 MB flash).
+# "audio" is a SPIFFS image built from assets/audio/ and flashed with the firmware.
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  3M,
+audio,    data, spiffs,  0x310000, 12M,

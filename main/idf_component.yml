@@ -1,0 +1,10 @@
+dependencies:
+  idf: ">=5.4,<6.0"
+  # ESP32-HUB75-MatrixPanel-DMA, pinned to tag 3.0.14 by commit hash.
+  ESP32-HUB75-MatrixPanel-DMA:
+    git: https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA.git
+    version: f17fb7fe9d487e9643f919eb5aeedea8d9d1f8d7
+  # ES8311 audio codec driver (latest stable; 2.0.0 is still beta).
+  espressif/esp_codec_dev: "==1.6.2"
+  # MP3 decoder (Espressif official, prebuilt core library).
+  espressif/esp_audio_codec: "==2.6.2"

@@ -1,0 +1,16 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# HUB75 library: build without Adafruit GFX / Arduino (pure ESP-IDF, NO_GFX).
+CONFIG_ESP32_HUB75_USE_GFX=n
+
+# Console on USB Serial/JTAG only: GPIO43 (UART0 TX) is used as I2S BCLK for audio.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# 16 MB of the 32 MB flash + custom partitions (12 MB SPIFFS "audio" for MP3 files).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# MP3 file names up to 60 bytes (UTF-8; ~20 CJK characters). Keep in sync with media::kMaxNameLen.
+CONFIG_SPIFFS_OBJ_NAME_LEN=64
