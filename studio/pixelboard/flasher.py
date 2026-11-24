@@ -39,11 +39,13 @@ def to_board_error(exc: Exception) -> BoardError:
     return BoardError(f"{MSG_UNEXPECTED}{text}")
 
 
-def _make_logger(progress: Progress):
+def _make_logger():
     from esptool.logger import TemplateLogger
 
     class _ProgressLogger(TemplateLogger):
-        """Routes esptool output to the Python log and progress bars to the UI callback."""
+        """Routes esptool output to the Python log and progress bars to `target` (the active Flasher)."""
+
+        target: Progress = staticmethod(lambda *args: None)
 
         def print(self, *args, **kwargs):
             message = " ".join(str(a) for a in args).strip()
@@ -64,12 +66,33 @@ def _make_logger(progress: Progress):
 
         def progress_bar(self, cur_iter, total_iters, prefix="", suffix="", bar_length=30):
             if total_iters > 0:
-                progress(prefix.strip() or "write", min(1.0, cur_iter / total_iters))
+                self.target(prefix.strip() or "write", min(1.0, cur_iter / total_iters))
 
         def set_verbosity(self, verbosity):
             pass
 
     return _ProgressLogger()
+
+
+_logger = None                      # installed into esptool once per process
+_logger_lock = threading.Lock()
+
+
+def _route_esptool_output(progress: Progress) -> None:
+    """Sends esptool's progress bars to `progress` from now on.
+
+    esptool's global `log` proxy only offers set_logger() while its own logger is active, so
+    the logger is installed once and later connections just change where it reports.
+    """
+    global _logger
+    with _logger_lock:
+        if _logger is None:
+            from esptool.logger import log as esptool_log
+
+            logger = _make_logger()
+            esptool_log.set_logger(logger)
+            _logger = logger
+        _logger.target = progress
 
 
 class Flasher:
@@ -93,9 +116,8 @@ class Flasher:
     def connect(self) -> None:
         try:
             from esptool import cmds
-            from esptool.logger import log as esptool_log
 
-            esptool_log.set_logger(_make_logger(self._on_bar))
+            _route_esptool_output(self._on_bar)
             self.progress("connect", 0.0)
             esp = cmds.detect_chip(self.port, BAUD, connect_attempts=CONNECT_ATTEMPTS)
             if esp.CHIP_NAME != "ESP32-S3":

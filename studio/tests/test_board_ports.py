@@ -126,6 +126,29 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class ReconnectTest(unittest.TestCase):
+    """Connecting twice in one process (flash, then flash again) must work."""
+
+    def connect(self, progress):
+        esp = mock.Mock(CHIP_NAME="ESP32-S3")
+        flasher = Flasher("COM11", progress)
+        with mock.patch("esptool.cmds.detect_chip", return_value=esp), \
+                mock.patch("esptool.cmds.run_stub", return_value=esp), mock.patch("esptool.cmds.attach_flash"):
+            flasher.connect()
+        return flasher
+
+    def test_second_connect_works_and_gets_progress(self):
+        from esptool.logger import log as esptool_log
+
+        first, second = [], []
+        self.connect(lambda *a: first.append(a))
+        self.connect(lambda *a: second.append(a))
+        first.clear()
+        esptool_log.progress_bar(cur_iter=1, total_iters=2, prefix="Writing")
+        self.assertEqual(first, [])
+        self.assertEqual(second[-1], ("Writing", 0.5))
+
+
 class FlashMd5Test(unittest.TestCase):
     def make(self, **esp_kwargs):
         flasher = Flasher("COM11")
