@@ -4,7 +4,7 @@ import logging
 import pathlib
 import sys
 
-from .board import BoardError
+from .board import AppInfo, BoardError, parse_app_desc
 
 log = logging.getLogger(__name__)
 
@@ -35,3 +35,13 @@ def load_images(base: pathlib.Path = None) -> dict:
         log.error("cannot load firmware images from %s: %s", base, exc)
         raise BoardError(MSG_MISSING) from exc
     return images
+
+
+def bundled_app_info(images: dict = None) -> AppInfo:
+    """Project name and version of the firmware bundled with the app."""
+    images = images or load_images()
+    info = parse_app_desc(images["app"][:256])
+    if info is None:
+        log.error("bundled app image has no esp_app_desc_t")
+        raise BoardError(MSG_MISSING)
+    return info

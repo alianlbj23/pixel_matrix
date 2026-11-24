@@ -30,3 +30,98 @@ def list_system_ports() -> list:
     from serial.tools import list_ports  # imported lazily so pure helpers work without pyserial
 
     return [PortInfo(p.device, p.vid, p.pid, p.description or "") for p in list_ports.comports()]
+
+
+# ---------------------------------------------------------------------------
+# Board state and flash planning
+# ---------------------------------------------------------------------------
+APP_OFFSET = 0x10000
+APP_HEAD_SIZE = 256
+PARTITION_TABLE_OFFSET = 0x8000
+PARTITION_TABLE_SIZE = 0xC00
+GIF_OFFSET = 0x210000
+AUDIO_OFFSET = 0x310000
+PROJECT_NAME = "pixel-board"
+_APP_DESC = 0x20          # esp_app_desc_t follows the image + first segment headers
+_APP_DESC_MAGIC = 0xABCD5432
+
+NOTE_FIRST_INSTALL = "這塊板子還沒有安裝 pixel-board 韌體，會先安裝完整韌體（約 1 分鐘）"
+NOTE_UPDATE_FIRMWARE = "板子上的韌體版本不同，會一併更新韌體"
+NOTE_REPLACE_MUSIC = "板子上的音樂會被這份清單取代"
+NOTE_KEEP_MUSIC = "沒有加入音樂：保留板子上原本的音樂"
+NOTE_NO_MUSIC = "沒有加入音樂：安裝後板子上沒有背景音樂"
+NOTE_READD_MUSIC = "韌體的儲存格式更新了，板子上原本的音樂可能無法播放，請重新加入音樂"
+MSG_NOTHING = "沒有要燒錄的內容"
+
+
+class AppInfo(NamedTuple):
+    project: str
+    version: str
+
+
+class BoardState(NamedTuple):
+    app: Optional[AppInfo]
+    partition_table: bytes
+
+
+class FlashPlan(NamedTuple):
+    kind: str       # "first_install" | "update_firmware" | "update_content"
+    regions: list   # [(offset, bytes)] in ascending offset order
+    notes: list     # plain-language notes shown before flashing
+
+
+def _cstr(raw: bytes) -> str:
+    return raw.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+
+
+def parse_app_desc(image_head: bytes) -> Optional[AppInfo]:
+    """Reads esp_app_desc_t from the first 256 bytes of an app image; None if absent."""
+    if len(image_head) < _APP_DESC + 0x50:
+        return None
+    magic = int.from_bytes(image_head[_APP_DESC:_APP_DESC + 4], "little")
+    if magic != _APP_DESC_MAGIC:
+        return None
+    version = _cstr(image_head[_APP_DESC + 0x10:_APP_DESC + 0x30])
+    project = _cstr(image_head[_APP_DESC + 0x30:_APP_DESC + 0x50])
+    return AppInfo(project, version)
+
+
+def read_state(flasher) -> BoardState:
+    """Reads what the planner needs from a connected Flasher (raises BoardError)."""
+    head = flasher.read(APP_OFFSET, APP_HEAD_SIZE)
+    table = flasher.read(PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE)
+    return BoardState(parse_app_desc(head), table)
+
+
+def plan_flash(state: BoardState, bundled: dict, bundled_app: AppInfo,
+               gif: Optional[bytes], audio: Optional[bytes]) -> FlashPlan:
+    """Decides which flash regions to write (see the design doc, section 6.5)."""
+    table_differs = state.partition_table[:len(bundled["partition_table"])] != bundled["partition_table"]
+    if state.app is None or state.app.project != PROJECT_NAME:
+        kind = "first_install"
+        regions = [(0x0, bundled["bootloader"]), (PARTITION_TABLE_OFFSET, bundled["partition_table"]),
+                   (APP_OFFSET, bundled["app"])]
+        notes = [NOTE_FIRST_INSTALL]
+    elif state.app.version != bundled_app.version or table_differs:
+        kind = "update_firmware"
+        regions = [(PARTITION_TABLE_OFFSET, bundled["partition_table"])] if table_differs else []
+        regions.append((APP_OFFSET, bundled["app"]))
+        notes = [NOTE_UPDATE_FIRMWARE]
+    else:
+        kind = "update_content"
+        regions = []
+        notes = []
+        if gif is None and audio is None:
+            raise BoardError(MSG_NOTHING)
+    if gif is not None:
+        regions.append((GIF_OFFSET, gif))
+    if audio is not None:
+        regions.append((AUDIO_OFFSET, audio))
+        notes.append(NOTE_REPLACE_MUSIC)
+    elif kind == "first_install":
+        notes.append(NOTE_NO_MUSIC)
+    elif table_differs:
+        notes.append(NOTE_READD_MUSIC)
+    else:
+        notes.append(NOTE_KEEP_MUSIC)
+    return FlashPlan(kind, regions, notes)

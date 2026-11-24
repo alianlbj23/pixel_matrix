@@ -46,5 +46,21 @@ class LoadImagesTest(unittest.TestCase):
             load_images(self.root)
 
 
+
+class BundledAppInfoTest(unittest.TestCase):
+    def test_reads_version_from_app_image(self):
+        from pixelboard.board import AppInfo
+        from pixelboard.firmware import bundled_app_info
+
+        head = (pathlib.Path(__file__).resolve().parent / "fixtures" / "app_head.bin").read_bytes()
+        self.assertEqual(bundled_app_info({"app": head + b"x"}), AppInfo("pixel-board", "1.0.0"))
+
+    def test_app_without_descriptor_is_board_error(self):
+        from pixelboard.firmware import bundled_app_info
+
+        with self.assertRaises(BoardError):
+            bundled_app_info({"app": b"\xff" * 512})
+
+
 if __name__ == "__main__":
     unittest.main()
