@@ -6,26 +6,32 @@
 const $ = (id) => document.getElementById(id);
 const api = () => window.pywebview.api;
 
-const layout = { chain: 1, split: false, offset_x: 0, offset_y: 0, scale: 1.0, brightness: 90, swap: false };
-const preview = { frames: [], width: 64, height: 32, index: 0, playing: true, timer: null, lut: null };
+const PANEL_W = 64;
+const PANEL_H = 32;
+const MAX_PANELS = 8;
+const ROTATIONS = [0, 90, 180, 270];
+const ARROWS = { 0: "↑", 90: "→", 180: "↓", 270: "←" };   // points at the panel's "up" edge (ly = 0)
+
+// GIF placement on the arrangement canvas (sent to render_preview / prepare_flash).
+const layout = { split: false, offset_x: 0, offset_y: 0, scale: 1.0, brightness: 90 };
+// Panel arrangement as last returned by the backend.
+const arrangement = { panels: [{ index: 0, x: 0, y: 0, rotation: 0 }], grid: true, max_frames: 64, power_warning: false };
+const preview = { frames: [], width: PANEL_W, height: PANEL_H, panels: [], index: 0, playing: true, timer: null, lut: null };
 let hasGif = false;
-let busy = false;
 let auditionIndex = -1;   // track being auditioned, -1 when stopped
 let musicState = null;
+let arrangeBusy = false;  // an arrangement call is in flight: ignore further edits until it answers
+let identifyBusy = false;
 
-// Transitional (Task 6): the backend now takes a placement dict and keeps the panel arrangement
-// itself; Task 7 replaces the chain/swap controls with the arrangement editor.
+// Flashing: null when idle, otherwise "prepare" (reading the board / confirm dialog) or "write" (confirm_flash).
+const flashState = { phase: null, stoppable: false, stopping: false };
+const isFlashing = () => flashState.phase !== null;
+
 function placement() {
   return {
     mode: layout.split ? "split" : "whole", offset_x: layout.offset_x, offset_y: layout.offset_y,
     scale: layout.scale, brightness: layout.brightness,
   };
-}
-
-async function setPanelCount(n) {
-  const res = await api().set_panel_count(n);
-  if (!res.ok) { setStatus(res.message, "error"); return; }
-  update({ chain: res.arrangement.panels.length });
 }
 
 const KIND_TEXT = {
@@ -37,22 +43,36 @@ const KIND_TEXT = {
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
-function setStatus(text, kind = "") {
+let statusSource = "";   // who wrote the current status line ("preview" errors clear themselves)
+
+function setStatus(text, kind = "", source = "") {
   const el = $("status");
   el.textContent = text || "";
   el.className = `status ${kind}`;
+  statusSource = text ? source : "";
   $("rescue").hidden = !(kind === "error" && text && text.includes("BOOT"));
 }
 
+function reportError(context, err) {
+  console.error(context, err);
+  setStatus(`發生未預期的錯誤：${err && err.message ? err.message : err}`, "error");
+}
+
 window.studio = {
-  onProgress(stage, fraction) {
+  onProgress(stage, fraction, stoppable) {
+    if (!isFlashing()) return;   // a late callback after the flash already ended
+    const f = Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0;
+    flashState.stoppable = stoppable === true;
     $("progress").hidden = false;
-    $("progress").value = fraction;
+    $("progress").value = f;
     const label = stage === "connect" ? "連線中…" : "燒錄中…";
-    setStatus(`${label} ${Math.round(fraction * 100)}%`);
+    setStatus(`${label} ${Math.round(f * 100)}%`);
+    syncStop();
   },
   onFilesDropped(paths) {
-    handleFiles(paths);
+    if (isFlashing()) { setStatus("燒錄中，請先停止燒錄", "error"); return; }
+    if (!Array.isArray(paths)) return;
+    handleFiles(paths.filter((p) => typeof p === "string")).catch((err) => reportError("drop", err));
   },
 };
 
@@ -78,42 +98,53 @@ function decode(b64) {
   return out;
 }
 
+const MAX_STAGE_H = 440;   // CSS px the preview may grow to before the cells shrink
+
 function geometry() {
   const stage = $("stage");
-  const seam = preview.width > 64 ? 1 : 0;
-  const cols = preview.width + seam;  // one empty cell between the two panels
-  const cell = Math.max(3, Math.min(14, Math.floor((stage.clientWidth - 16) / cols)));
-  return { cell, seamCells: seam, cols };
+  const fitW = Math.floor((stage.clientWidth - 16) / preview.width);
+  const fitH = Math.floor(MAX_STAGE_H / preview.height);
+  return { cell: Math.max(1, Math.min(14, fitW, fitH)) };
 }
 
 function drawFrame() {
   const canvas = $("led");
   const ctx = canvas.getContext("2d");
-  const { cell, cols } = geometry();
-  canvas.width = cols * cell;
+  const { cell } = geometry();
+  canvas.width = preview.width * cell;
   canvas.height = preview.height * cell;
   ctx.fillStyle = "#050505";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const frame = preview.frames[preview.index];
-  const lut = preview.lut;
+  const lut = preview.lut || buildLut(layout.brightness);
+  const dots = cell >= 3;   // tiny cells: plain squares (1 px minimum) so very big canvases stay readable
   const r = cell * 0.42;
-  for (let y = 0; y < preview.height; y++) {
-    for (let x = 0; x < preview.width; x++) {
-      let R = 0, G = 0, B = 0;
-      if (frame) {
-        const i = (y * preview.width + x) * 3;
-        R = frame.rgb[i]; G = frame.rgb[i + 1]; B = frame.rgb[i + 2];
+  for (const p of preview.panels) {
+    const x1 = Math.min(preview.width, p.x + p.w);
+    const y1 = Math.min(preview.height, p.y + p.h);
+    for (let y = Math.max(0, p.y); y < y1; y++) {
+      for (let x = Math.max(0, p.x); x < x1; x++) {
+        let R = 0, G = 0, B = 0;
+        if (frame) {
+          const i = (y * preview.width + x) * 3;
+          R = frame.rgb[i]; G = frame.rgb[i + 1]; B = frame.rgb[i + 2];
+        }
+        ctx.fillStyle = (R | G | B) ? `rgb(${lut[R]},${lut[G]},${lut[B]})` : "#161616";
+        if (dots) {
+          ctx.beginPath();
+          ctx.arc(x * cell + cell / 2, y * cell + cell / 2, r, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x * cell, y * cell, cell, cell);
+        }
       }
-      const lit = R | G | B;
-      ctx.fillStyle = lit ? `rgb(${lut[R]},${lut[G]},${lut[B]})` : "#161616";
-      const cx = (x + (x >= 64 ? 1 : 0)) * cell + cell / 2;
-      ctx.beginPath();
-      ctx.arc(cx, y * cell + cell / 2, r, 0, Math.PI * 2);
-      ctx.fill();
     }
   }
-  $("frame-info").textContent = preview.frames.length
-    ? `第 ${preview.index + 1} / ${preview.frames.length} 格 · ${preview.frames[preview.index].ms} ms`
+  ctx.strokeStyle = "#3d4552";
+  ctx.lineWidth = 1;
+  for (const p of preview.panels) ctx.strokeRect(p.x * cell + 0.5, p.y * cell + 0.5, p.w * cell - 1, p.h * cell - 1);
+  $("frame-info").textContent = frame
+    ? `第 ${preview.index + 1} / ${preview.frames.length} 格 · ${frame.ms} ms`
     : "—";
 }
 
@@ -127,50 +158,307 @@ function schedule() {
   }, preview.frames[preview.index].ms);
 }
 
+// Empty panels at their arrangement positions (no GIF yet, or the GIF cannot be rendered).
+function showEmptyPanels() {
+  clearTimeout(preview.timer);
+  const rects = panelRects(arrangement.panels);
+  preview.frames = [];
+  preview.panels = rects;
+  preview.width = Math.max(...rects.map((p) => p.x + p.w));
+  preview.height = Math.max(...rects.map((p) => p.y + p.h));
+  preview.index = 0;
+  drawFrame();
+}
+
+function validPreview(res) {
+  const okInt = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  return okInt(res.width, 1, 1024) && okInt(res.height, 1, 1024)
+    && Array.isArray(res.panels) && res.panels.length >= 1
+    && res.panels.every((p) => p && okInt(p.x, 0, 1024) && okInt(p.y, 0, 1024) && okInt(p.w, 1, 64) && okInt(p.h, 1, 64))
+    && Array.isArray(res.frames)
+    && res.frames.every((f) => f && typeof f.rgb_b64 === "string" && Number.isFinite(f.ms));
+}
+
 let previewTimer = null;
+let previewSeq = 0;
 function requestPreview() {
   clearTimeout(previewTimer);
-  previewTimer = setTimeout(refreshPreview, 200);
+  previewTimer = setTimeout(() => refreshPreview().catch((err) => reportError("preview", err)), 200);
 }
 
 async function refreshPreview() {
   preview.lut = buildLut(layout.brightness);
-  if (!hasGif) {
-    preview.frames = [];
-    preview.width = 64 * layout.chain;
-    drawFrame();
-    return;
-  }
+  if (!hasGif) { showEmptyPanels(); return; }
+  if (isFlashing()) return;   // render_preview is refused while flashing; redraw after unlock
+  const seq = ++previewSeq;
   const res = await api().render_preview(placement());
-  if (!res.ok) {
-    setStatus(res.message, "error");
+  if (seq !== previewSeq) return;   // a newer request is on its way
+  if (!res.ok && isFlashing()) return;   // refused because flashing started meanwhile; redrawn after unlock
+  if (!res.ok || !validPreview(res)) {
+    setStatus(res.ok ? "預覽資料不正確，請重新加入 GIF" : res.message, "error", "preview");
+    showEmptyPanels();
     return;
   }
-  preview.frames = res.frames.map((f) => ({ rgb: decode(f.rgb_b64), ms: f.ms }));
+  const size = res.width * res.height * 3;
+  const frames = res.frames.map((f) => ({ rgb: decode(f.rgb_b64), ms: f.ms }));
+  if (frames.some((f) => f.rgb.length !== size)) {
+    setStatus("預覽資料不正確，請重新加入 GIF", "error", "preview");
+    showEmptyPanels();
+    return;
+  }
+  if (statusSource === "preview") setStatus("");
+  preview.frames = frames;
+  preview.panels = res.panels;
   preview.width = res.width;
   preview.height = res.height;
-  preview.index = Math.min(preview.index, preview.frames.length - 1);
+  preview.index = Math.max(0, Math.min(preview.index, frames.length - 1));
   drawFrame();
   schedule();
 }
 
 // ---------------------------------------------------------------------------
-// Controls
+// Panel arrangement editor
+// ---------------------------------------------------------------------------
+const EDIT_MARGIN = 64;      // LED px of free space around the panels so a tile can be dropped beside them
+const EDIT_MAX_H = 360;      // CSS px
+const EDIT_MAX_SCALE = 3;    // CSS px per LED
+const DRAG_THRESHOLD = 4;    // CSS px of mouse movement before a press counts as a drag (else: rotate)
+const editor = { scale: 1, drag: null };
+
+const panelSize = (rotation) => (rotation === 90 || rotation === 270 ? [PANEL_H, PANEL_W] : [PANEL_W, PANEL_H]);
+
+function panelRects(panels) {
+  return panels.map((p) => {
+    const [w, h] = panelSize(p.rotation);
+    return { index: p.index, x: p.x, y: p.y, w, h, rotation: p.rotation };
+  });
+}
+
+// Validates an arrangement state from the backend; returns false (and keeps the old one) when malformed.
+function acceptArrangement(res) {
+  const a = res && res.arrangement;
+  const okInt = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  if (!a || !Array.isArray(a.panels) || a.panels.length < 1 || a.panels.length > MAX_PANELS
+      || !a.panels.every((p, i) => p && p.index === i && okInt(p.x, 0, 1024) && okInt(p.y, 0, 1024)
+        && ROTATIONS.includes(p.rotation))
+      || typeof res.grid !== "boolean" || !okInt(res.max_frames, 1, 1000)) {
+    console.error("bad arrangement state", res);
+    return false;
+  }
+  arrangement.panels = a.panels.map((p) => ({ index: p.index, x: p.x, y: p.y, rotation: p.rotation }));
+  arrangement.grid = res.grid;
+  arrangement.max_frames = res.max_frames;
+  arrangement.power_warning = res.power_warning === true;
+  if (!arrangement.grid) layout.split = false;   // "每塊一份" only exists for grid arrangements
+  return true;
+}
+
+function drawArrangement() {
+  const area = $("arrange-area");
+  const rects = panelRects(arrangement.panels);
+  const W = Math.max(...rects.map((p) => p.x + p.w)) + 2 * EDIT_MARGIN;
+  const H = Math.max(...rects.map((p) => p.y + p.h)) + 2 * EDIT_MARGIN;
+  const avail = Math.max(120, area.parentElement.clientWidth - 40);
+  const s = Math.min(EDIT_MAX_SCALE, avail / W, EDIT_MAX_H / H);
+  editor.scale = s;
+  area.style.width = `${Math.round(W * s)}px`;
+  area.style.height = `${Math.round(H * s)}px`;
+  area.replaceChildren(...rects.map((p) => makeTile(p, s)));
+  const n = rects.length;
+  $("panel-count").textContent = `${n} 塊`;
+  $("arrange-info").textContent = `GIF 最多 ${arrangement.max_frames} 格`;
+  $("power-warning").hidden = !arrangement.power_warning;
+}
+
+function makeTile(p, s) {
+  const tile = document.createElement("div");
+  tile.className = "tile";
+  tile.dataset.index = p.index;
+  placeTile(tile, p.x, p.y, p.w, p.h, s);
+  tile.title = `第 ${p.index + 1} 塊（拖曳移動，點一下旋轉）`;
+  const side = Math.min(p.w, p.h) * s;
+  const num = document.createElement("span");
+  num.className = "num";
+  num.textContent = String(p.index + 1);
+  num.style.fontSize = `${Math.max(10, Math.round(side * 0.6))}px`;
+  const arrow = document.createElement("span");
+  arrow.className = `arrow up-${p.rotation}`;
+  arrow.textContent = ARROWS[p.rotation];
+  arrow.style.fontSize = `${Math.max(9, Math.round(side * 0.32))}px`;
+  tile.append(num, arrow);
+  tile.addEventListener("pointerdown", (e) => startTileDrag(e, tile, p));
+  return tile;
+}
+
+function placeTile(tile, x, y, w, h, s) {
+  tile.style.left = `${(x + EDIT_MARGIN) * s}px`;
+  tile.style.top = `${(y + EDIT_MARGIN) * s}px`;
+  tile.style.width = `${w * s}px`;
+  tile.style.height = `${h * s}px`;
+}
+
+function startTileDrag(e, tile, p) {
+  if (e.button !== 0 || isFlashing() || arrangeBusy || editor.drag) return;
+  e.preventDefault();
+  tile.setPointerCapture(e.pointerId);
+  editor.drag = { tile, p, startX: e.clientX, startY: e.clientY, x: p.x, y: p.y, moved: false, ghost: null };
+  tile.addEventListener("pointermove", onTileMove);
+  tile.addEventListener("pointerup", onTileUp);
+  tile.addEventListener("pointercancel", onTileCancel);
+}
+
+function onTileMove(e) {
+  const d = editor.drag;
+  if (!d) return;
+  const dx = e.clientX - d.startX;
+  const dy = e.clientY - d.startY;
+  if (!d.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+  if (!d.moved) {
+    d.moved = true;
+    d.ghost = d.tile.cloneNode(true);
+    d.ghost.classList.add("ghost");
+    d.tile.classList.add("dragging");
+    $("arrange-area").append(d.ghost);
+  }
+  d.x = Math.round(d.p.x + dx / editor.scale);
+  d.y = Math.round(d.p.y + dy / editor.scale);
+  placeTile(d.ghost, d.x, d.y, d.p.w, d.p.h, editor.scale);
+}
+
+function endTileDrag() {
+  const d = editor.drag;
+  editor.drag = null;
+  if (!d) return null;
+  d.tile.removeEventListener("pointermove", onTileMove);
+  d.tile.removeEventListener("pointerup", onTileUp);
+  d.tile.removeEventListener("pointercancel", onTileCancel);
+  return d;
+}
+
+function onTileUp() {
+  const d = endTileDrag();
+  if (!d) return;
+  if (!d.moved) {
+    arrangeCall(() => api().rotate_panel(d.p.index));
+  } else if (d.x === d.p.x && d.y === d.p.y) {
+    drawArrangement();   // dropped where it started
+  } else {
+    arrangeCall(() => api().move_panel(d.p.index, d.x, d.y));   // the backend snaps or puts it back
+  }
+}
+
+function onTileCancel() {
+  if (endTileDrag()) drawArrangement();
+}
+
+// Runs one arrangement-changing API call and redraws from whatever arrangement it returns.
+async function arrangeCall(call) {
+  if (arrangeBusy || isFlashing()) return;
+  arrangeBusy = true;
+  try {
+    const res = await call();
+    if (res && res.arrangement && !acceptArrangement(res)) {
+      setStatus("排列資料不正確，請重新開啟程式", "error");
+    } else if (res && res.message) {
+      setStatus(res.message, "error");   // overlap put back, canvas too big, save failed, locked …
+    } else if (res && res.ok && statusSource !== "preview") {
+      setStatus("");
+    }
+  } catch (err) {
+    reportError("arrangement", err);
+  } finally {
+    arrangeBusy = false;
+    drawArrangement();
+    syncControls();
+    requestPreview();
+  }
+}
+
+async function identifyPanels() {
+  if (identifyBusy || isFlashing()) return;
+  identifyBusy = true;
+  syncControls();
+  setStatus("正在請板子顯示面板編號…");
+  try {
+    const res = await api().identify($("port").value || null);
+    if (res.ok) {
+      setStatus(res.message, "ok");
+    } else {
+      setStatus(res.message, "error");
+      if (typeof res.message === "string" && res.message.includes("安裝/更新韌體")) pointAt($("install-fw"));
+    }
+  } catch (err) {
+    reportError("identify", err);
+  } finally {
+    identifyBusy = false;
+    syncControls();
+  }
+}
+
+function pointAt(button) {
+  button.classList.remove("attention");
+  void button.offsetWidth;   // restart the animation
+  button.classList.add("attention");
+  button.scrollIntoView({ block: "nearest" });
+  setTimeout(() => button.classList.remove("attention"), 4000);
+}
+
+function bindArrangement() {
+  $("panel-minus").addEventListener("click", () =>
+    arrangeCall(() => api().set_panel_count(arrangement.panels.length - 1)));
+  $("panel-plus").addEventListener("click", () =>
+    arrangeCall(() => api().set_panel_count(arrangement.panels.length + 1)));
+  for (const b of $("presets").children) {
+    b.addEventListener("click", () => arrangeCall(() => api().apply_preset(b.dataset.preset)));
+  }
+  $("identify").addEventListener("click", identifyPanels);
+  $("install-fw").addEventListener("click", () => runFlash(true));
+}
+
+// ---------------------------------------------------------------------------
+// Controls and the flashing lock
 // ---------------------------------------------------------------------------
 function syncControls() {
-  for (const b of $("chain").children) b.classList.toggle("active", Number(b.dataset.value) === layout.chain);
+  const locked = isFlashing();
+  document.body.classList.toggle("flashing", locked);
+  for (const el of document.querySelectorAll(".lockable")) {
+    const controls = el.matches("button, input, select") ? [el] : el.querySelectorAll("button, input, select");
+    for (const c of controls) c.disabled = locked;
+  }
   for (const b of $("split").children) b.classList.toggle("active", String(layout.split) === b.dataset.value);
-  $("split").querySelector('[data-value="true"]').disabled = layout.chain !== 2;
-  $("swap").disabled = layout.chain !== 2;
+  $("split-help").hidden = !arrangement.grid;
+  $("split-off").hidden = arrangement.grid;
   $("offset").textContent = `X ${layout.offset_x} · Y ${layout.offset_y}`;
   $("scale-val").textContent = `${Math.round(layout.scale * 100)}%`;
   $("brightness-val").textContent = layout.brightness;
-  $("flash").disabled = busy;
+  if (!locked) {
+    const n = arrangement.panels.length;
+    $("split").querySelector('[data-value="true"]').disabled = !arrangement.grid;
+    $("panel-minus").disabled = n <= 1;
+    $("panel-plus").disabled = n >= MAX_PANELS;
+    $("identify").disabled = identifyBusy;
+    $("install-fw").disabled = identifyBusy;   // identify holds the port for up to 1.5 s
+  }
+  $("flash").disabled = locked || identifyBusy;
+  syncStop();
+}
+
+function syncStop() {
+  const btn = $("stop");
+  const note = $("stop-note");
+  btn.hidden = !isFlashing();
+  if (!isFlashing()) { note.hidden = true; return; }
+  // Before confirm_flash nothing is being written: the confirm dialog's 取消 is the way out.
+  const canStop = flashState.phase === "write" && flashState.stoppable && !flashState.stopping;
+  btn.disabled = !canStop;
+  btn.textContent = flashState.stopping ? "停止中…" : "停止燒錄";
+  note.hidden = canStop || flashState.stopping;
+  note.textContent = flashState.phase === "write" ? "正在寫入韌體，請稍候" : "正在讀取板子狀態，請稍候";
 }
 
 function update(changes) {
   Object.assign(layout, changes);
-  if (layout.chain !== 2) { layout.split = false; layout.swap = false; $("swap").checked = false; }
+  if (!arrangement.grid) layout.split = false;
   layout.offset_x = Math.max(-128, Math.min(128, layout.offset_x));
   layout.offset_y = Math.max(-128, Math.min(128, layout.offset_y));
   syncControls();
@@ -178,7 +466,6 @@ function update(changes) {
 }
 
 function bindControls() {
-  for (const b of $("chain").children) b.addEventListener("click", () => setPanelCount(Number(b.dataset.value)));
   for (const b of $("split").children) b.addEventListener("click", () => update({ split: b.dataset.value === "true" }));
   for (const b of document.querySelectorAll(".nudge [data-dx]")) {
     b.addEventListener("click", () => update({
@@ -196,7 +483,6 @@ function bindControls() {
     syncControls();
     drawFrame();
   });
-  $("swap").addEventListener("change", (e) => update({ swap: e.target.checked }));
 
   $("play").addEventListener("click", () => {
     preview.playing = !preview.playing;
@@ -215,7 +501,7 @@ function bindControls() {
   $("step-fwd").addEventListener("click", () => step(1));
 
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || $("confirm").open) return;
+    if (e.target.tagName === "INPUT" || $("confirm").open || isFlashing()) return;
     const moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     const m = moves[e.key];
     if (m && hasGif) {
@@ -228,7 +514,7 @@ function bindControls() {
   const canvas = $("led");
   let drag = null;
   canvas.addEventListener("mousedown", (e) => {
-    if (!hasGif) return;
+    if (!hasGif || isFlashing()) return;
     drag = { x: e.clientX, y: e.clientY, ox: layout.offset_x, oy: layout.offset_y };
     canvas.classList.add("dragging");
   });
@@ -243,7 +529,7 @@ function bindControls() {
     }
   });
   window.addEventListener("mouseup", () => { drag = null; canvas.classList.remove("dragging"); });
-  window.addEventListener("resize", drawFrame);
+  window.addEventListener("resize", () => { drawFrame(); if (!editor.drag) drawArrangement(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -277,11 +563,12 @@ function renderMusic(state) {
     meta.textContent = `${(t.size / 1048576).toFixed(1)} MB · ${t.channels === 1 ? "單聲道" : "立體聲"}`;
     const btn = (label, title, fn) => {
       const b = document.createElement("button");
-      b.textContent = label; b.title = title; b.addEventListener("click", fn);
+      b.textContent = label; b.title = title;
+      b.addEventListener("click", () => fn().catch((err) => reportError("music", err)));
       return b;
     };
     li.append(name, meta,
-      btn(auditionIndex === i ? "⏹" : "▶", auditionIndex === i ? "停止" : "試聽", () => audition(i)),
+      btn(auditionIndex === i ? "⏹" : "▶", auditionIndex === i ? "停止" : "試聽", async () => audition(i)),
       btn("↑", "往上移", async () => i > 0 && renderMusic(await api().move_track(i, i - 1))),
       btn("↓", "往下移", async () => i < state.tracks.length - 1 && renderMusic(await api().move_track(i, i + 1))),
       btn("✕", "移除", async () => renderMusic(await api().remove_track(i))));
@@ -299,6 +586,7 @@ function renderMusic(state) {
     li.textContent = `${r.name}：${r.message}`;
     return li;
   }));
+  syncControls();   // new track buttons pick up the lock
 }
 
 function stopAudition(redraw = true) {
@@ -325,6 +613,7 @@ async function audition(index) {
 }
 
 async function handleFiles(paths) {
+  if (isFlashing()) { setStatus("燒錄中，請先停止燒錄", "error"); return; }
   const gifs = paths.filter((p) => p.toLowerCase().endsWith(".gif"));
   const mp3s = paths.filter((p) => p.toLowerCase().endsWith(".mp3"));
   const others = paths.length - gifs.length - mp3s.length;
@@ -335,82 +624,135 @@ async function handleFiles(paths) {
 }
 
 async function pick(kind) {
-  const res = await api().pick_files(kind);
-  if (res.ok && res.paths.length) await handleFiles(res.paths);
+  try {
+    const res = await api().pick_files(kind);
+    if (res.ok && Array.isArray(res.paths) && res.paths.length) await handleFiles(res.paths);
+    else if (!res.ok) setStatus(res.message, "error");
+  } catch (err) {
+    reportError("pick", err);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Board and flashing
 // ---------------------------------------------------------------------------
 async function findBoard() {
-  const res = await api().find_board();
-  const select = $("port");
-  select.replaceChildren(...res.ports.map((p) => new Option(p, p)));
-  select.hidden = res.ports.length < 2;
-  $("board-status").textContent = res.message;
-  $("board-status").className = res.ports.length ? "" : "muted";
+  try {
+    const res = await api().find_board();
+    const ports = Array.isArray(res.ports) ? res.ports.filter((p) => typeof p === "string") : [];
+    const select = $("port");
+    select.replaceChildren(...ports.map((p) => new Option(p, p)));
+    select.hidden = ports.length < 2;
+    $("board-status").textContent = res.message;
+    $("board-status").className = ports.length ? "" : "muted";
+  } catch (err) {
+    reportError("find_board", err);
+  }
 }
 
-function setBusy(value) {
-  busy = value;
-  $("find").disabled = value;
+function setFlashPhase(phase) {
+  flashState.phase = phase;
+  flashState.stoppable = false;
+  flashState.stopping = false;
   syncControls();
 }
 
-function confirmDialog(plan) {
+function confirmDialog(plan, firmwareOnly) {
   return new Promise((resolve) => {
-    $("confirm-title").textContent = KIND_TEXT[plan.kind] || "確認燒錄";
-    $("confirm-notes").replaceChildren(...plan.notes.map((n) => {
+    $("confirm-title").textContent = firmwareOnly
+      ? "安裝/更新韌體：只寫入韌體，不會改動板子上的 GIF 和音樂"
+      : KIND_TEXT[plan.kind] || "確認燒錄";
+    const notes = Array.isArray(plan.notes) ? plan.notes.filter((n) => typeof n === "string") : [];
+    $("confirm-notes").replaceChildren(...notes.map((n) => {
       const li = document.createElement("li");
       li.textContent = n;
       return li;
     }));
     const dlg = $("confirm");
-    const done = (ok) => { dlg.close(); resolve(ok); };
+    const done = (ok) => { if (dlg.open) dlg.close(); resolve(ok); };
     $("confirm-ok").onclick = () => done(true);
     $("confirm-cancel").onclick = () => done(false);
-    dlg.oncancel = () => resolve(false);
+    dlg.oncancel = () => resolve(false);   // Esc closes the dialog by itself
     dlg.showModal();
   });
 }
 
-async function flash() {
-  setBusy(true);
+// Content flash (firmwareOnly = false) or the 安裝/更新韌體 button (firmwareOnly = true).
+// Editing is locked from the first call until every exit path below has run.
+async function runFlash(firmwareOnly) {
+  if (isFlashing()) return;
+  if (auditionIndex >= 0) stopAudition();
+  setFlashPhase("prepare");
   $("progress").hidden = true;
   $("progress").value = 0;
   setStatus("讀取板子狀態中…");
+  let writing = false;   // confirm_flash was called: never cancel_flash from here on (it would block)
   try {
     const port = $("port").value || null;
-    const plan = await api().prepare_flash(placement(), port);
-    if (!plan.ok) { setStatus(plan.message, "error"); return; }
+    const plan = await api().prepare_flash(firmwareOnly ? null : placement(), port, firmwareOnly);
+    if (!plan.ok) {
+      setStatus(plan.message, plan.up_to_date ? "ok" : "error");
+      return;
+    }
     setStatus("");
-    if (!(await confirmDialog(plan))) {
-      await api().cancel_flash();
+    if (!(await confirmDialog(plan, firmwareOnly))) {
       setStatus("已取消燒錄");
       return;
     }
+    writing = true;
+    setFlashPhase("write");
+    setStatus("燒錄中…");
     const res = await api().confirm_flash();
     setStatus(res.message, res.ok ? "ok" : "error");
     if (res.ok) $("progress").value = 1;
   } catch (err) {
-    setStatus(`發生未預期的錯誤：${err.message}`, "error");
+    reportError("flash", err);
   } finally {
-    setBusy(false);
+    if (!writing) {
+      // Dialog dismissed, prepare failed or something threw before writing: release the backend lock
+      // (harmless when prepare_flash already released it).
+      try {
+        await api().cancel_flash();
+      } catch (err) {
+        reportError("cancel_flash", err);
+      }
+    }
+    setFlashPhase(null);
+    requestPreview();
     findBoard();
+  }
+}
+
+async function stopFlash() {
+  if (flashState.phase !== "write" || !flashState.stoppable || flashState.stopping) return;
+  flashState.stopping = true;
+  syncStop();
+  setStatus("正在停止燒錄…");
+  try {
+    await api().stop_flash();   // never blocks; confirm_flash returns {stopped: true} shortly after
+  } catch (err) {
+    reportError("stop_flash", err);
   }
 }
 
 // ---------------------------------------------------------------------------
 window.addEventListener("pywebviewready", async () => {
   bindControls();
+  bindArrangement();
   $("find").addEventListener("click", findBoard);
   $("pick-gif").addEventListener("click", () => pick("gif"));
   $("change-gif").addEventListener("click", () => pick("gif"));
   $("pick-mp3").addEventListener("click", () => pick("mp3"));
-  $("flash").addEventListener("click", flash);
-  const arr = await api().get_arrangement();
-  if (arr.ok) layout.chain = arr.arrangement.panels.length;
+  $("flash").addEventListener("click", () => runFlash(false));
+  $("stop").addEventListener("click", stopFlash);
+  try {
+    const arr = await api().get_arrangement();
+    if (!acceptArrangement(arr)) setStatus("無法讀取面板排列，先用 1 塊面板", "error");
+  } catch (err) {
+    reportError("get_arrangement", err);
+  }
+  drawArrangement();
   syncControls();
-  refreshPreview();
+  refreshPreview().catch((err) => reportError("preview", err));
   findBoard();
 });
