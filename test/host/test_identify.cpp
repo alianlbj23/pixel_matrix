@@ -99,34 +99,38 @@ static void test_numbers() {
 }
 
 static void test_arrow_points_up() {
+    // The '^' glyph at 3x, drawn at panel-local (41, 5): a 3 px tip, a 9 px and a 15 px head row,
+    // then a 3 px shaft. Pinning every row's width and position tells an up arrow from a down one.
+    struct Row {
+        int y0, y1;  // panel-local ly range (inclusive)
+        int x0, x1;  // lit panel-local lx range (inclusive), everything else in 40..56 is dark
+    };
+    static const Row kRows[] = {
+        {5, 7, 47, 49},    // tip at the smallest ly
+        {8, 10, 44, 52},
+        {11, 13, 41, 55},  // widest row of the head
+        {14, 25, 47, 49},  // shaft
+    };
     const Canvas c = render(2);
     for (int i = 0; i < 2; ++i) {
         const int ox = kW * i;
-        int top = -1, bottom = -1;
-        for (int y = 1; y <= 30; ++y) {
-            int row = 0;
-            for (int x = ox + 40; x <= ox + 56; ++x) row += c.lit(x, y) ? 1 : 0;
-            if (row > 0 && top < 0) top = y;
-            if (row > 0) bottom = y;
+        for (int ly = 1; ly <= 30; ++ly) {
+            int x0 = -1, x1 = -1;  // expected lit range on this row, none if outside the arrow
+            for (const Row &r : kRows) {
+                if (ly >= r.y0 && ly <= r.y1) {
+                    x0 = r.x0;
+                    x1 = r.x1;
+                }
+            }
+            for (int lx = 40; lx <= 56; ++lx) {
+                const bool want = x0 >= 0 && lx >= x0 && lx <= x1;
+                if (c.lit(ox + lx, ly) != want) {
+                    std::printf("FAIL arrow panel %d (lx %d, ly %d): lit=%d want=%d\n", i, lx, ly,
+                                c.lit(ox + lx, ly) ? 1 : 0, want ? 1 : 0);
+                    ++g_failures;
+                }
+            }
         }
-        CHECK(top >= 1 && bottom > top + 10);
-        if (top < 0) continue;
-        int top_w = 0, widest = 0;
-        for (int y = top; y <= bottom; ++y) {
-            int row = 0;
-            for (int x = ox + 40; x <= ox + 56; ++x) row += c.lit(x, y) ? 1 : 0;
-            if (y == top) top_w = row;
-            if (row > widest) widest = row;
-        }
-        CHECK(top_w > 0 && top_w < widest);  // the tip (narrowest) is at the smallest ly
-        // The tip is centred in x=40..56.
-        for (int x = ox + 40; x <= ox + 56; ++x) {
-            if (c.lit(x, top)) CHECK(x >= ox + 46 && x <= ox + 50);
-        }
-        // Bottom row is narrower than the widest row (shaft), so the head is near ly=0.
-        int bottom_w = 0;
-        for (int x = ox + 40; x <= ox + 56; ++x) bottom_w += c.lit(x, bottom) ? 1 : 0;
-        CHECK(bottom_w < widest);
     }
 }
 
