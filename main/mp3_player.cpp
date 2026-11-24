@@ -1,30 +1,31 @@
 #include "mp3_player.h"
 
-#include <dirent.h>
-
+#include <algorithm>
 #include <cstdint>
-#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "audio.h"
+#include "crc32.h"
 #include "esp_audio_dec_default.h"
 #include "esp_audio_simple_dec_default.h"
 #include "esp_log.h"
-#include "esp_spiffs.h"
+#include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "media.h"
+#include "pxa.h"
 
 namespace mp3_player {
 
 namespace {
 
 constexpr const char *TAG = "mp3";
-constexpr const char *kMountPoint = "/audio";
 constexpr const char *kPartitionLabel = "audio";
+constexpr uint8_t kAudioPartitionSubtype = 0x41;
 constexpr size_t kReadSize = 2048;
+constexpr size_t kCrcChunk = 4096;
 constexpr size_t kInitialOutSize = 4608;   // one MPEG-1 Layer III frame, 16-bit stereo
 constexpr size_t kMaxOutSize = 64 * 1024;  // refuse absurd decoder buffer requests
 constexpr uint32_t kTaskStack = 8192;
@@ -32,64 +33,62 @@ constexpr UBaseType_t kTaskPriority = 5;
 constexpr BaseType_t kTaskCore = 1;  // app_main (GIF loop) runs on core 0
 
 bool g_started = false;
+const esp_partition_t *g_part = nullptr;
 
-struct FileCloser {
-    void operator()(FILE *f) const { fclose(f); }
-};
 struct DecoderCloser {
     void operator()(void *h) const { esp_audio_simple_dec_close(h); }
 };
 
-bool mount() {
-    esp_vfs_spiffs_conf_t conf = {};
-    conf.base_path = kMountPoint;
-    conf.partition_label = kPartitionLabel;
-    conf.max_files = 2;
-    conf.format_if_mount_failed = false;  // never wipe the music partition
-    esp_err_t err = esp_vfs_spiffs_register(&conf);
+bool read_flash(uint32_t offset, void *dst, size_t len) {
+    const esp_err_t err = esp_partition_read(g_part, offset, dst, len);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "mount \"%s\" FAILED (%s); was the audio partition flashed?", kPartitionLabel,
-                 esp_err_to_name(err));
+        ESP_LOGE(TAG, "pxa: read %u bytes at 0x%x failed (%s)", static_cast<unsigned>(len),
+                 static_cast<unsigned>(offset), esp_err_to_name(err));
         return false;
-    }
-    size_t total = 0, used = 0;
-    err = esp_spiffs_info(kPartitionLabel, &total, &used);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "mounted %s: %u KB used of %u KB", kMountPoint, static_cast<unsigned>(used / 1024),
-                 static_cast<unsigned>(total / 1024));
-    } else {
-        ESP_LOGW(TAG, "esp_spiffs_info failed (%s)", esp_err_to_name(err));
     }
     return true;
 }
 
-std::vector<std::string> list_playlist() {
-    DIR *dir = opendir(kMountPoint);
-    if (dir == nullptr) {
-        ESP_LOGE(TAG, "opendir %s failed", kMountPoint);
+// Reads and validates the PXA1 header, file table and payload CRC. Empty on any error (logged).
+std::vector<pxa::Entry> load_playlist() {
+    uint8_t hdr[pxa::kHeaderSize];
+    if (!read_flash(0, hdr, sizeof(hdr))) return {};
+    pxa::Header h{};
+    const char *why = nullptr;
+    if (!pxa::parse_header(hdr, sizeof(hdr), &h, &why)) {
+        ESP_LOGE(TAG, "pxa: %s (no music flashed, or written by older firmware)", why);
         return {};
     }
-    std::vector<std::string> names;
-    while (const dirent *e = readdir(dir)) {
-        names.emplace_back(e->d_name);
+    if (pxa::kHeaderSize + static_cast<uint64_t>(h.payload_len) > g_part->size) {
+        ESP_LOGE(TAG, "pxa: payload larger than partition");
+        return {};
     }
-    closedir(dir);
-    std::vector<std::string> playlist = media::make_playlist(names);
-    if (playlist.size() != names.size()) {
-        ESP_LOGW(TAG, "%u file(s) skipped (not .mp3, hidden, or name longer than %u bytes)",
-                 static_cast<unsigned>(names.size() - playlist.size()), static_cast<unsigned>(media::kMaxNameLen));
+    std::vector<uint8_t> chunk(kCrcChunk);
+    uint32_t crc = 0;
+    for (uint32_t done = 0; done < h.payload_len;) {
+        const size_t n = std::min<size_t>(kCrcChunk, h.payload_len - done);
+        if (!read_flash(pxa::kHeaderSize + done, chunk.data(), n)) return {};
+        crc = crc32::update(crc, chunk.data(), n);
+        done += n;
     }
-    return playlist;
+    if (crc != h.crc) {
+        ESP_LOGE(TAG, "pxa: crc mismatch");
+        return {};
+    }
+    std::vector<uint8_t> table(pxa::kEntrySize * h.file_count);
+    if (!table.empty() && !read_flash(pxa::kHeaderSize, table.data(), table.size())) return {};
+    std::vector<pxa::Entry> entries;
+    if (!pxa::parse_table(table.data(), table.size(), h.file_count,
+                          static_cast<uint32_t>(pxa::kHeaderSize + h.payload_len), &entries, &why)) {
+        ESP_LOGE(TAG, "pxa: %s", why);
+        return {};
+    }
+    return entries;
 }
 
-// Decodes one file and streams it to the speaker. Returns false (logged) on any error.
-bool play_file(const std::string &name) {
-    const std::string path = std::string(kMountPoint) + "/" + name;
-    std::unique_ptr<FILE, FileCloser> file(fopen(path.c_str(), "rb"));
-    if (!file) {
-        ESP_LOGE(TAG, "%s: cannot open", name.c_str());
-        return false;
-    }
+// Decodes one file from the partition and streams it to the speaker. Returns false (logged) on error.
+bool play_file(const pxa::Entry &entry) {
+    const std::string &name = entry.name;
 
     esp_audio_simple_dec_cfg_t cfg = {};
     cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
@@ -108,16 +107,14 @@ bool play_file(const std::string &name) {
     uint64_t pcm_bytes = 0;
     uint32_t bytes_per_sec = 0;
 
-    for (;;) {
-        const size_t n = fread(in.data(), 1, in.size(), file.get());
-        if (n == 0 && ferror(file.get())) {
-            ESP_LOGE(TAG, "%s: read error", name.c_str());
-            return false;
-        }
+    for (uint32_t pos = 0;;) {
+        const size_t n = std::min<size_t>(in.size(), entry.length - pos);
+        if (n > 0 && !read_flash(entry.offset + pos, in.data(), n)) return false;
+        pos += static_cast<uint32_t>(n);
         esp_audio_simple_dec_raw_t raw = {};
         raw.buffer = in.data();
         raw.len = static_cast<uint32_t>(n);
-        raw.eos = n < in.size();
+        raw.eos = pos >= entry.length;
         // Do not overwrite `in` while raw.len > 0: the decoder may still reference it.
         while (raw.len > 0) {
             esp_audio_simple_dec_out_t frame = {};
@@ -177,17 +174,17 @@ bool play_file(const std::string &name) {
 
 // Plays the playlist forever. Returns only when nothing can be played.
 void run() {
+    const std::vector<pxa::Entry> playlist = load_playlist();
+    if (playlist.empty()) {
+        ESP_LOGW(TAG, "no tracks; add music with PixelBoard Studio");
+        return;
+    }
+    ESP_LOGI(TAG, "playlist: %u file(s)", static_cast<unsigned>(playlist.size()));
     for (;;) {
-        const std::vector<std::string> playlist = list_playlist();
-        if (playlist.empty()) {
-            ESP_LOGW(TAG, "no .mp3 files in %s; put them in assets/audio/ and flash again", kMountPoint);
-            return;
-        }
-        ESP_LOGI(TAG, "playlist: %u file(s)", static_cast<unsigned>(playlist.size()));
         size_t played = 0;
-        for (const std::string &name : playlist) {
-            ESP_LOGI(TAG, "playing %s", name.c_str());
-            if (play_file(name)) ++played;
+        for (const pxa::Entry &entry : playlist) {
+            ESP_LOGI(TAG, "playing %s", entry.name.c_str());
+            if (play_file(entry)) ++played;
         }
         if (played == 0) {
             ESP_LOGE(TAG, "none of the %u file(s) could be played; stopping", static_cast<unsigned>(playlist.size()));
@@ -217,14 +214,16 @@ bool start() {
         esp_audio_dec_unregister_default();
         return false;
     }
-    if (!mount()) {
+    g_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                      static_cast<esp_partition_subtype_t>(kAudioPartitionSubtype), kPartitionLabel);
+    if (g_part == nullptr) {
+        ESP_LOGE(TAG, "no \"audio\" partition (old partition table?)");
         esp_audio_simple_dec_unregister_default();
         esp_audio_dec_unregister_default();
         return false;
     }
     if (xTaskCreatePinnedToCore(task_main, "mp3", kTaskStack, nullptr, kTaskPriority, nullptr, kTaskCore) != pdPASS) {
         ESP_LOGE(TAG, "cannot create player task (out of memory)");
-        esp_vfs_spiffs_unregister(kPartitionLabel);
         esp_audio_simple_dec_unregister_default();
         esp_audio_dec_unregister_default();
         return false;

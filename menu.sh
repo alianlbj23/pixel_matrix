@@ -111,6 +111,11 @@ do_tests() {
             'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_pxg.cpp main/pxg.cpp main/crc32.cpp -o "$1" && "$1"' _ "$out"
         rc=$?
     fi
+    if [[ $rc -eq 0 ]]; then
+        run_step "Host unit tests (pxa)" bash -c \
+            'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_pxa.cpp main/pxa.cpp main/crc32.cpp -o "$1" && "$1"' _ "$out"
+        rc=$?
+    fi
     rm -f "$out"
     [[ $rc -eq 0 ]] || return $rc
     ensure_studio_venv || return 1

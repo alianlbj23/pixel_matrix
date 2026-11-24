@@ -1,9 +1,9 @@
 # pixel-board partition table (uses the first 16 MB of the 32 MB flash).
 #   gif   : PXG1 animation (PixelBoard Studio / tools/pack_gif.py), read at boot
-#   audio : MP3 files (SPIFFS image built from assets/audio/)
+#   audio : PXA1 MP3 playlist (PixelBoard Studio / tools/pack_audio.py)
 # Name,   Type, SubType, Offset,   Size
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  2M,
 gif,      data, 0x40,    0x210000, 1M,
-audio,    data, spiffs,  0x310000, 12M,
+audio,    data, 0x41,    0x310000, 12M,
