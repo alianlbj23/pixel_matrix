@@ -80,6 +80,10 @@ static void test_draw_unsupported_char() {
     CHECK(font5x7::text_width("H#") == 11);
 }
 
+static void test_no_gif_glyphs() {
+    for (char c : {'N', 'G', 'I', 'F'}) CHECK(font5x7::glyph(c) != nullptr);
+}
+
 static void test_draw_null() {
     int unsupported = -1;
     Pixels px = render(nullptr, 0, 0, &unsupported);
@@ -95,6 +99,7 @@ int main() {
     test_draw_offset();
     test_draw_unsupported_char();
     test_draw_null();
+    test_no_gif_glyphs();
     if (g_failures != 0) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

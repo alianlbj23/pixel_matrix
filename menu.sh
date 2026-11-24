@@ -101,9 +101,18 @@ do_tests() {
             'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_media.cpp main/media.cpp -o "$1" && "$1"' _ "$out"
         rc=$?
     fi
+    if [[ $rc -eq 0 ]]; then
+        run_step "Host unit tests (crc32)" bash -c \
+            'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_crc32.cpp main/crc32.cpp -o "$1" && "$1"' _ "$out"
+        rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+        run_step "Host unit tests (pxg)" bash -c \
+            'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_pxg.cpp main/pxg.cpp main/crc32.cpp -o "$1" && "$1"' _ "$out"
+        rc=$?
+    fi
     rm -f "$out"
     [[ $rc -eq 0 ]] || return $rc
-    run_step "Host unit tests (gif2c)" python3 -m unittest discover -s test/host -p 'test_*.py' || return 1
     ensure_studio_venv || return 1
     run_step "Studio unit tests" "$STUDIO_PY" -m unittest discover -s studio/tests -t studio
 }
@@ -131,11 +140,9 @@ read_board_value() {
     printf '%s' "$value"
 }
 
-# Pick a GIF from assets/gif/ and regenerate main/gif_anim_data.cpp (then Build + flash).
+# Pick a GIF from assets/gif/ and write assets/gif.pxg (PXG1); Flash writes it to the gif partition.
 do_convert_gif() {
-    local gifs=() g pw ph chain split=1
-    pw="$(read_board_value kPanelWidth)" || return 1
-    ph="$(read_board_value kPanelHeight)" || return 1
+    local gifs=() g chain split_arg=()
     chain="$(read_board_value kPanelChain)" || return 1
     for g in assets/gif/*.gif; do
         [[ -f "$g" ]] && gifs+=("$g")
@@ -154,14 +161,13 @@ do_convert_gif() {
         echo "Layout for ${chain} chained panels:"
         select _ in "${layouts[@]}"; do
             case "$REPLY" in
-                1) split="$chain"; break ;;
-                2) split=1; break ;;
+                1) split_arg=(--split); break ;;
+                2) split_arg=(); break ;;
                 *) echo "Invalid choice" ;;
             esac
         done
     fi
-    run_step "Convert $g" python3 tools/gif2c.py "$g" main/gif_anim_data.cpp \
-        --width $(( pw * chain )) --height "$ph" --split "$split"
+    run_step "Convert $g" python3 tools/pack_gif.py "$g" assets/gif.pxg --chain "$chain" "${split_arg[@]}"
 }
 
 do_build_studio() { do_build && run_step "Build Studio exe" bash studio/build_exe.sh; }
