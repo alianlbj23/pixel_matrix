@@ -1,7 +1,7 @@
-"""GIF decoding and layout onto 1 or 2 chained 64x32 HUB75 panels (RGB888 frames).
+"""GIF decoding and placement onto an arrangement canvas of 64x32 HUB75 panels (RGB888 frames).
 
-The bytes returned by render() are exactly what gets packed into the board's gif
-partition, so the app preview and the panel show the same pixels.
+render() returns canvas frames; layout.chain_frame() maps them to the board's chain buffer,
+so the app preview and the panel show the same pixels.
 """
 import logging
 import pathlib
@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PIL import Image, ImageSequence, UnidentifiedImageError
+
+from . import layout
 
 log = logging.getLogger(__name__)
 
@@ -37,22 +39,20 @@ class GifError(Exception):
 
 
 @dataclass(frozen=True)
-class Layout:
-    chain: int = 1
-    split: bool = False
+class Placement:
+    mode: str = "whole"     # "whole": one picture over the canvas; "split": one grid cell per panel
     offset_x: int = 0
     offset_y: int = 0
     scale: float = 1.0
 
     def validate(self) -> None:
-        if self.chain not in (1, 2):
-            raise GifError(f"面板數只能是 1 或 2（目前是 {self.chain}）")
-        if self.split and self.chain != 2:
-            raise GifError("「每塊面板一份」需要 2 塊串接的面板")
-        if not isinstance(self.scale, (int, float)) or not MIN_SCALE <= self.scale <= MAX_SCALE:
+        if self.mode not in ("whole", "split"):
+            raise GifError("擺放方式只能是「整張」或「每塊面板一份」")
+        if (isinstance(self.scale, bool) or not isinstance(self.scale, (int, float))
+                or not MIN_SCALE <= self.scale <= MAX_SCALE):
             raise GifError(f"縮放倍數要在 {MIN_SCALE}–{MAX_SCALE} 之間")
         for name, value in (("水平位置", self.offset_x), ("垂直位置", self.offset_y)):
-            if not isinstance(value, int) or not -MAX_OFFSET <= value <= MAX_OFFSET:
+            if isinstance(value, bool) or not isinstance(value, int) or not -MAX_OFFSET <= value <= MAX_OFFSET:
                 raise GifError(f"{name}要在 -{MAX_OFFSET}–{MAX_OFFSET} 之間")
 
 
@@ -115,43 +115,71 @@ def load(path) -> SourceGif:
     return SourceGif(path.name, frames, durations, box)
 
 
-def _paste(canvas, img, scale, cell_w, cell_h, layout):
-    """Scales img and pastes it centred in a cell_w x cell_h canvas, shifted by the layout offset."""
+def _paste(canvas, img, scale, cell_w, cell_h, placement):
+    """Scales img and pastes it centred in a cell_w x cell_h canvas, shifted by the placement offset."""
     w = max(1, round(img.width * scale))
     h = max(1, round(img.height * scale))
     scaled = img.resize((w, h), _RESAMPLE)
-    x = (cell_w - w) // 2 + layout.offset_x
-    y = (cell_h - h) // 2 + layout.offset_y
+    x = (cell_w - w) // 2 + placement.offset_x
+    y = (cell_h - h) // 2 + placement.offset_y
     canvas.paste(scaled, (x, y), scaled)  # PIL clips to the canvas, so nothing leaks out
 
 
-def render(src: SourceGif, layout: Layout) -> list:
-    """Returns [(rgb888_bytes, duration_ms)] for a (64*chain) x 32 canvas."""
-    layout.validate()
-    width = PANEL_W * layout.chain
+def _edges(lo, hi, parts):
+    return [lo + round(i * (hi - lo) / parts) for i in range(parts + 1)]
+
+
+def render(src: SourceGif, placement: Placement, arr: layout.Arrangement) -> list:
+    """Returns [(rgb888_bytes, duration_ms)] canvas frames of size layout.bounds(arr)."""
+    placement.validate()
+    try:
+        arr = layout.normalize(arr)
+        cw, ch = layout.bounds(arr)
+    except layout.LayoutError as exc:
+        raise GifError(exc.user_message) from exc
     out = []
-    if not layout.split:
+    if placement.mode == "whole":
         for rgba, ms in zip(src.frames, src.durations):
-            canvas = Image.new("RGB", (width, PANEL_H), (0, 0, 0))
-            fit = min(width / rgba.width, PANEL_H / rgba.height)
-            _paste(canvas, rgba, fit * layout.scale, width, PANEL_H, layout)
+            canvas = Image.new("RGB", (cw, ch), (0, 0, 0))
+            fit = min(cw / rgba.width, ch / rgba.height)
+            _paste(canvas, rgba, fit * placement.scale, cw, ch, placement)
             out.append((canvas.tobytes(), ms))
         return out
 
+    shape = layout.grid_shape(arr)
+    if shape is None:
+        raise GifError("這種排法只能用「整張」")
+    rows, cols, order = shape
     if src.visible_box is None:
         raise GifError("這個 GIF 是全透明的，沒有可以顯示的內容")
     left, top, right, bottom = src.visible_box
-    if right - left < layout.chain:
-        raise GifError("GIF 的可見範圍太窄，無法分給每塊面板")
-    edges = [left + round(i * (right - left) / layout.chain) for i in range(layout.chain + 1)]
-    widest = max(edges[i + 1] - edges[i] for i in range(layout.chain))
-    fit = min(PANEL_W / widest, PANEL_H / (bottom - top))  # same scale for every panel
+    if right - left < cols or bottom - top < rows:
+        raise GifError("GIF 的可見範圍太小，無法分給每塊面板")
+    xs, ys = _edges(left, right, cols), _edges(top, bottom, rows)
+    panels = {p.index: p for p in arr.panels}
+    pw, ph = layout.panel_size(panels[order[0]].rotation)  # grid_shape guarantees one rotation
+    widest = max(xs[i + 1] - xs[i] for i in range(cols))
+    tallest = max(ys[i + 1] - ys[i] for i in range(rows))
+    fit = min(pw / widest, ph / tallest)  # one common scale for every panel
     for rgba, ms in zip(src.frames, src.durations):
-        canvas = Image.new("RGB", (width, PANEL_H), (0, 0, 0))
-        for i in range(layout.chain):
-            panel = Image.new("RGB", (PANEL_W, PANEL_H), (0, 0, 0))
-            strip = rgba.crop((edges[i], top, edges[i + 1], bottom))
-            _paste(panel, strip, fit * layout.scale, PANEL_W, PANEL_H, layout)
-            canvas.paste(panel, (i * PANEL_W, 0))
+        canvas = Image.new("RGB", (cw, ch), (0, 0, 0))
+        for r in range(rows):
+            for c in range(cols):
+                p = panels[order[r * cols + c]]
+                cell = Image.new("RGB", (pw, ph), (0, 0, 0))
+                piece = rgba.crop((xs[c], ys[r], xs[c + 1], ys[r + 1]))
+                _paste(cell, piece, fit * placement.scale, pw, ph, placement)
+                canvas.paste(cell, (p.x, p.y))
         out.append((canvas.tobytes(), ms))
     return out
+
+
+def render_chain(src: SourceGif, placement: Placement, chain: int) -> list:
+    """Transitional helper for the row-of-1-or-2 callers: chain-buffer frames (64*chain x 32)."""
+    if chain not in (1, 2):
+        raise GifError(f"面板數只能是 1 或 2（目前是 {chain}）")
+    if placement.mode == "split" and chain != 2:
+        raise GifError("「每塊面板一份」需要 2 塊串接的面板")
+    arr = layout.preset("row", chain)
+    cw, ch = layout.bounds(arr)
+    return [(layout.chain_frame(rgb, cw, ch, arr), ms) for rgb, ms in render(src, placement, arr)]

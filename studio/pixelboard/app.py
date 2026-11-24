@@ -33,17 +33,22 @@ def _fail(message: str) -> dict:
 
 
 def _layout_from(d: dict):
-    """Validates the layout dict coming from JS. Returns (gifproc.Layout, brightness, swap)."""
+    """Validates the layout dict coming from JS. Returns (gifproc.Placement, chain, brightness, swap)."""
     try:
-        layout = gifproc.Layout(chain=int(d["chain"]), split=bool(d["split"]), offset_x=int(d["offset_x"]),
-                                offset_y=int(d["offset_y"]), scale=float(d["scale"]))
+        layout = gifproc.Placement(mode="split" if d["split"] else "whole", offset_x=int(d["offset_x"]),
+                                   offset_y=int(d["offset_y"]), scale=float(d["scale"]))
+        chain = int(d["chain"])
         brightness, swap = int(d["brightness"]), bool(d["swap"])
     except (KeyError, TypeError, ValueError) as exc:
         raise gifproc.GifError(MSG_BAD_LAYOUT) from exc
     layout.validate()
+    if chain not in (1, 2):
+        raise gifproc.GifError(f"面板數只能是 1 或 2（目前是 {chain}）")
+    if layout.mode == "split" and chain != 2:
+        raise gifproc.GifError("「每塊面板一份」需要 2 塊串接的面板")
     if not pxg.MIN_BRIGHTNESS <= brightness <= pxg.MAX_BRIGHTNESS:
         raise gifproc.GifError(f"亮度要在 {pxg.MIN_BRIGHTNESS}–{pxg.MAX_BRIGHTNESS} 之間")
-    return layout, brightness, swap
+    return layout, chain, brightness, swap
 
 
 class StudioApi:
@@ -89,18 +94,18 @@ class StudioApi:
     def _render(self, layout_dict: dict):
         if self._gif is None:
             raise gifproc.GifError(MSG_NO_GIF)
-        layout, brightness, swap = _layout_from(layout_dict)
-        return gifproc.render(self._gif, layout), layout, brightness, swap
+        placement, chain, brightness, swap = _layout_from(layout_dict)
+        return gifproc.render_chain(self._gif, placement, chain), chain, brightness, swap
 
     def render_preview(self, layout: dict) -> dict:
         try:
-            frames, lay, brightness, _ = self._render(layout)
+            frames, chain, brightness, _ = self._render(layout)
         except gifproc.GifError as exc:
             return _fail(exc.user_message)
         except Exception as exc:  # noqa: BLE001
             log.exception("render_preview failed")
             return _fail(f"預覽失敗：{exc}")
-        return {"ok": True, "width": gifproc.PANEL_W * lay.chain, "height": gifproc.PANEL_H,
+        return {"ok": True, "width": gifproc.PANEL_W * chain, "height": gifproc.PANEL_H,
                 "brightness": brightness,
                 "frames": [{"rgb_b64": base64.b64encode(rgb).decode("ascii"), "ms": ms} for rgb, ms in frames]}
 
@@ -184,8 +189,8 @@ class StudioApi:
             self._close_pending()
             gif = None
             if self._gif is not None:
-                frames, lay, brightness, swap = self._render(layout)
-                gif = pxg.pack(frames, lay.chain, brightness, swap)
+                frames, chain, brightness, swap = self._render(layout)
+                gif = pxg.pack(frames, chain, brightness, swap)
             audio = pxa.pack([pxa.Track(t["name"], t["data"]) for t in self._tracks]) if self._tracks else None
             if not port:
                 ports = find_board_ports(self._list_ports())

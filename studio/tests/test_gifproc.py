@@ -4,10 +4,11 @@ import unittest
 
 from PIL import Image
 
-from pixelboard import gifproc
-from pixelboard.gifproc import GifError, Layout, load, render
+from pixelboard import gifproc, layout
+from pixelboard.gifproc import GifError, Placement, load, render
 
 W1, H = 64, 32
+ROW1, ROW2 = layout.preset("row", 1), layout.preset("row", 2)
 
 
 def make_gif(path, frames, durations):
@@ -56,7 +57,7 @@ class LoadTest(GifTestCase):
     def test_scales_to_fit_and_centers_on_black(self):
         # 20x20 -> fit 1.6 -> 32x32 centred on 64x32: columns 16..47.
         src = load(self.red_square_gif(frames=2, durations=[150, 300]))
-        frames = render(src, Layout())
+        frames = render(src, Placement(), ROW1)
         self.assertEqual([d for _, d in frames], [150, 300])
         for rgb, _ in frames:
             self.assertEqual(len(rgb), W1 * H * 3)
@@ -68,13 +69,13 @@ class LoadTest(GifTestCase):
     def test_missing_duration_uses_default(self):
         path = self.dir / "still.gif"
         Image.new("RGB", (4, 4), (0, 255, 0)).save(path)
-        frames = render(load(path), Layout())
+        frames = render(load(path), Placement(), ROW1)
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0][1], gifproc.DEFAULT_DURATION_MS)
 
     def test_zero_duration_uses_default(self):
         src = load(self.red_square_gif(frames=2, durations=[0, 0]))
-        self.assertEqual([d for _, d in render(src, Layout())], [100, 100])
+        self.assertEqual([d for _, d in render(src, Placement(), ROW1)], [100, 100])
 
     def test_duration_is_clamped(self):
         self.assertEqual(gifproc.clamp_duration(5), gifproc.MIN_DURATION_MS)
@@ -113,7 +114,7 @@ class LoadTest(GifTestCase):
     def test_huge_dimensions_ok(self):
         path = self.dir / "huge.gif"
         Image.new("RGB", (4000, 4000), (255, 0, 0)).save(path)
-        frames = render(load(path), Layout())
+        frames = render(load(path), Placement(), ROW1)
         self.assertEqual(len(frames[0][0]), W1 * H * 3)
         self.assertTrue(is_red(px(frames[0][0], W1, 32, 16)))
 
@@ -121,15 +122,15 @@ class LoadTest(GifTestCase):
 class LayoutTest(GifTestCase):
     def test_offset_moves_content_by_pixels(self):
         src = load(self.red_square_gif())
-        base = render(src, Layout())[0][0]
-        moved = render(src, Layout(offset_x=3))[0][0]
+        base = render(src, Placement(), ROW1)[0][0]
+        moved = render(src, Placement(offset_x=3), ROW1)[0][0]
         for y in range(H):
             for x in range(W1 - 3):
                 self.assertEqual(px(moved, W1, x + 3, y), px(base, W1, x, y), (x, y))
 
     def test_scale_half_shrinks_around_center(self):
         # fit 1.6 x 0.5 -> 16x16 centred: columns 24..39, rows 8..23.
-        rgb = render(load(self.red_square_gif()), Layout(scale=0.5))[0][0]
+        rgb = render(load(self.red_square_gif()), Placement(scale=0.5), ROW1)[0][0]
         row = [is_red(px(rgb, W1, x, 16)) for x in range(W1)]
         self.assertEqual(row.index(True), 24)
         self.assertEqual(sum(row), 16)
@@ -137,10 +138,27 @@ class LayoutTest(GifTestCase):
 
     def test_layout_validation(self):
         src = load(self.red_square_gif())
-        for bad in (Layout(chain=3), Layout(scale=0), Layout(scale=5), Layout(offset_x=999),
-                    Layout(offset_y=-200), Layout(chain=1, split=True)):
+        for bad in (Placement(mode="bogus"), Placement(scale=0), Placement(scale=5), Placement(offset_x=999),
+                    Placement(offset_y=-200), Placement(offset_x=1.5)):
             with self.assertRaises(GifError, msg=str(bad)):
-                render(src, bad)
+                render(src, bad, ROW1)
+
+    def test_whole_on_column(self):
+        col = layout.preset("column", 2)  # canvas 64x64
+        rgb = render(load(self.red_square_gif()), Placement(), col)[0][0]
+        self.assertEqual(len(rgb), 64 * 64 * 3)
+        self.assertTrue(is_red(px(rgb, 64, 32, 5)))
+        self.assertTrue(is_red(px(rgb, 64, 32, 60)))
+        self.assertTrue(is_red(px(rgb, 64, 2, 32)))  # 20x20 fits 64x64 exactly
+
+    def test_render_chain_matches_row_canvas(self):
+        src = load(self.red_square_gif())
+        self.assertEqual(gifproc.render_chain(src, Placement(), 2), render(src, Placement(), ROW2))
+        for chain in (3, 0):
+            with self.assertRaises(GifError):
+                gifproc.render_chain(src, Placement(), chain)
+        with self.assertRaises(GifError):
+            gifproc.render_chain(src, Placement("split"), 1)
 
 
 class SplitTest(GifTestCase):
@@ -154,7 +172,7 @@ class SplitTest(GifTestCase):
     def test_each_half_goes_to_its_own_panel(self):
         # Halves 16x10 -> fit min(64/16, 32/10)=3.2 -> 51x32 at x=6 in each panel.
         frames = render(self.pair_gif([pair_frame(), pair_frame().transpose(Image.FLIP_TOP_BOTTOM)]),
-                        Layout(chain=2, split=True))
+                        Placement("split"), ROW2)
         rgb = frames[0][0]
         for y in (2, 16, 29):
             for x in (10, 30, 50):
@@ -165,22 +183,50 @@ class SplitTest(GifTestCase):
                 self.assertEqual(px(rgb, 128, x, y), (0, 0, 0), (x, y))
 
     def test_crop_is_shared_by_all_frames(self):
-        frames = render(self.pair_gif([pair_frame(right=False), pair_frame()]), Layout(chain=2, split=True))
+        frames = render(self.pair_gif([pair_frame(right=False), pair_frame()]), Placement("split"), ROW2)
         first = frames[0][0]
         self.assertTrue(is_red(px(first, 128, 30, 16)))
         for x in range(64, 128):
             self.assertEqual(px(first, 128, x, 16), (0, 0, 0), x)
 
     def test_split_offset_clipped_per_panel(self):
-        rgb = render(self.pair_gif([pair_frame()]), Layout(chain=2, split=True, offset_x=60))[0][0]
+        rgb = render(self.pair_gif([pair_frame()]), Placement("split", offset_x=60), ROW2)[0][0]
         for y in range(H):
             for x in range(64, 128):
                 self.assertFalse(is_red(px(rgb, 128, x, y)), (x, y))
 
+    def test_split_grid_2x2(self):
+        img = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+        for (x, y), colour in {(0, 0): (255, 0, 0), (20, 0): (0, 255, 0),
+                               (0, 20): (0, 0, 255), (20, 20): (255, 255, 255)}.items():
+            img.paste(colour + (255,), (x, y, x + 20, y + 20))
+        rgb = render(self.pair_gif([img]), Placement("split"), layout.preset("grid", 4))[0][0]
+        self.assertEqual((len(rgb), ), (128 * 64 * 3, ))
+        for (cx, cy), want in {(32, 16): (255, 0, 0), (96, 16): (0, 255, 0),
+                               (32, 48): (0, 0, 255), (96, 48): (255, 255, 255)}.items():
+            p = px(rgb, 128, cx, cy)
+            self.assertTrue(all(abs(a - b) < 40 for a, b in zip(p, want)), (cx, cy, p))
+
+    def test_split_with_gap(self):
+        arr = layout.Arrangement((layout.Panel(0, 0, 0, 0), layout.Panel(1, 80, 0, 0)))
+        rgb = render(self.pair_gif([pair_frame()]), Placement("split"), arr)[0][0]
+        self.assertEqual(len(rgb), 144 * 32 * 3)
+        self.assertTrue(is_red(px(rgb, 144, 30, 16)))
+        self.assertTrue(is_blue(px(rgb, 144, 110, 16)))
+        for y in range(H):
+            for x in range(64, 80):
+                self.assertEqual(px(rgb, 144, x, y), (0, 0, 0), (x, y))
+
+    def test_split_irregular_rejected(self):
+        arr = layout.Arrangement((layout.Panel(0, 0, 0, 0), layout.Panel(1, 64, 0, 0), layout.Panel(2, 0, 32, 0)))
+        with self.assertRaises(GifError) as cm:
+            render(self.pair_gif([pair_frame()]), Placement("split"), arr)
+        self.assertIn("這種排法只能用「整張」", cm.exception.user_message)
+
     def test_fully_transparent_raises(self):
         src = self.pair_gif([Image.new("RGBA", (10, 10), (0, 0, 0, 0))])
         with self.assertRaises(GifError) as cm:
-            render(src, Layout(chain=2, split=True))
+            render(src, Placement("split"), ROW2)
         self.assertIn("透明", cm.exception.user_message)
 
 

@@ -28,7 +28,7 @@ def main(argv=None) -> int:
 
     try:
         src = gifproc.load(args.input)
-        frames = gifproc.render(src, gifproc.Layout(chain=args.chain, split=args.split))
+        frames = gifproc.render_chain(src, gifproc.Placement(mode="split" if args.split else "whole"), args.chain)
         data = pxg.pack(frames, args.chain, args.brightness, args.swap)
     except gifproc.GifError as exc:
         log.error("%s", exc.user_message)
