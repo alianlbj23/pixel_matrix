@@ -150,6 +150,8 @@ do_convert_gif() {
         --width $(( pw * chain )) --height "$ph" --split "$split"
 }
 
+do_build_studio() { do_build && run_step "Build Studio exe" bash studio/build_exe.sh; }
+
 options=(
     "Build"
     "Flash"
@@ -158,6 +160,7 @@ options=(
     "Clean + rebuild"
     "Host unit tests"
     "Convert GIF (assets/gif -> firmware)"
+    "Build Studio exe (Windows)"
     "Quit"
 )
 
@@ -174,7 +177,8 @@ while true; do
             5) do_rebuild ;;
             6) do_tests ;;
             7) do_convert_gif ;;
-            8) exit 0 ;;
+            8) do_build_studio ;;
+            9) exit 0 ;;
             *) echo "Invalid choice: $REPLY" ;;
         esac
         break

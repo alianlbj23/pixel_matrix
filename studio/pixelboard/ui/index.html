@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>PixelBoard Studio</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="card">
+    <h1>PixelBoard Studio</h1>
+    <section class="row">
+      <button id="find">尋找板子</button>
+      <select id="port" hidden></select>
+    </section>
+    <p id="status" class="status">請用 USB 接上板子，然後按「尋找板子」。</p>
+    <section class="row">
+      <button id="flash" disabled>燒錄韌體</button>
+    </section>
+    <progress id="progress" max="1" value="0" hidden></progress>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
