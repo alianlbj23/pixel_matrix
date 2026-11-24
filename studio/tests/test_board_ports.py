@@ -120,3 +120,42 @@ class WriteChunkedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloseResetTest(unittest.TestCase):
+    def make(self):
+        flasher = Flasher("COM11")
+        esp = mock.Mock()
+        flasher._esp = esp
+        return flasher, esp
+
+    def test_reset_then_close(self):
+        flasher, esp = self.make()
+        order = mock.Mock()
+        order.attach_mock(esp._port.close, "close")
+        with mock.patch("esptool.cmds.reset_chip", side_effect=lambda e, mode: order.reset(mode)) as reset:
+            flasher.close(reset=True)
+        reset.assert_called_once_with(esp, "hard-reset")
+        self.assertEqual([c[0] for c in order.mock_calls], ["reset", "close"])
+        self.assertIsNone(flasher._esp)
+
+    def test_reset_failure_still_closes_port(self):
+        flasher, esp = self.make()
+        with mock.patch("esptool.cmds.reset_chip", side_effect=FatalError("gone")):
+            with self.assertLogs("pixelboard.flasher", level="WARNING"):
+                flasher.close(reset=True)
+        esp._port.close.assert_called_once()
+        self.assertIsNone(flasher._esp)
+
+    def test_no_connection_no_reset(self):
+        flasher = Flasher("COM11")
+        with mock.patch("esptool.cmds.reset_chip") as reset:
+            flasher.close(reset=True)
+        reset.assert_not_called()
+
+    def test_plain_close_does_not_reset(self):
+        flasher, esp = self.make()
+        with mock.patch("esptool.cmds.reset_chip") as reset:
+            flasher.close()
+        reset.assert_not_called()
+        esp._port.close.assert_called_once()

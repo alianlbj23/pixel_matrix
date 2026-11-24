@@ -498,6 +498,7 @@ class StudioApi:
         """Writes the prepared plan. A stop_flash() during gif/audio ends it early (board is reset)."""
         if not self._lock.acquire(blocking=False):
             return _fail(MSG_BUSY)
+        reset_done = False
         try:
             if self._pending is None:
                 return _fail(MSG_NO_PENDING)
@@ -505,6 +506,7 @@ class StudioApi:
             flasher.progress = self._progress
             finished = flasher.write_chunked(plan.regions, self._stop)
             flasher.hard_reset()
+            reset_done = True
             if not finished:
                 log.info("flash stopped by the user: %s", plan.kind)
                 return {"ok": False, "stopped": True, "message": MSG_STOPPED}
@@ -516,7 +518,7 @@ class StudioApi:
             log.exception("confirm_flash failed")
             return _fail(to_board_error(exc).user_message)
         finally:
-            self._close_pending()
+            self._close_pending(reset=not reset_done)  # failed before our own reset: leave download mode
             self._end_flashing()
             self._lock.release()
 

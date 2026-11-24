@@ -476,6 +476,27 @@ class FlashApiTest(ApiTestCase):
         self.assertTrue(FakeFlasher.instances[-1].closed_with_reset)  # not left in download mode
         self.assertFalse(self.api.confirm_flash()["ok"])
 
+    def test_write_failure_resets_board(self):
+        self.api.open_gif(str(self.gif))
+        self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])
+        fl = FakeFlasher.instances[-1]
+
+        def boom(offset, data):
+            raise BoardError("寫入失敗")
+        fl._write_piece = boom
+        res = self.api.confirm_flash()
+        self.assertEqual(res, {"ok": False, "message": "寫入失敗"})
+        self.assertTrue(fl.closed_with_reset)
+        self.assertFalse(fl.reset)  # the failed confirm did not reach its own hard_reset
+
+    def test_successful_confirm_does_not_reset_twice(self):
+        self.api.open_gif(str(self.gif))
+        self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])
+        self.assertTrue(self.api.confirm_flash()["ok"])
+        fl = FakeFlasher.instances[-1]
+        self.assertTrue(fl.reset)
+        self.assertFalse(fl.closed_with_reset)
+
     def test_nothing_to_flash(self):
         res = self.api.prepare_flash(PLACEMENT, None)  # no GIF, no music, firmware up to date
         self.assertFalse(res["ok"])
