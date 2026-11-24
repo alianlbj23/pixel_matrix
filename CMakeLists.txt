@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.16)
 
 # Firmware version: PixelBoard Studio compares it with the board's to decide whether to
 # update the app. Bump it with every firmware change that ships in the exe.
-set(PROJECT_VER "1.0.0")
+set(PROJECT_VER "1.1.0")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(pixel-board)
