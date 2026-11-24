@@ -367,14 +367,31 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "out of memory creating the display mutex");
         return;
     }
-    const bool have_gif = load_gif(&g_gif);
+    bool have_gif = load_gif(&g_gif);
     g_chain = have_gif ? g_gif.chain : kPanelChain;
     g_brightness = have_gif ? g_gif.brightness : kPanelBrightness;
+    bool panel_ok;
     {
         DisplayLock lock;
-        if (!create_panel(g_chain, g_brightness)) return;
+        panel_ok = create_panel(g_chain, g_brightness);
+        if (!panel_ok && (g_chain != kPanelChain || g_brightness != kPanelBrightness)) {
+            ESP_LOGW(TAG, "retrying HUB75 init with the default chain=%u brightness=%u",
+                     static_cast<unsigned>(kPanelChain), static_cast<unsigned>(kPanelBrightness));
+            g_chain = kPanelChain;
+            g_brightness = kPanelBrightness;
+            panel_ok = create_panel(g_chain, g_brightness);
+            if (panel_ok && have_gif && g_gif.chain != g_chain) {
+                ESP_LOGE(TAG, "GIF is laid out for %u panel(s), not playing it on the fallback display",
+                         static_cast<unsigned>(g_gif.chain));
+                have_gif = false;
+            }
+        }
     }
-    start_cmd_task();
+    start_cmd_task();  // even without a display, so PixelBoard Studio can still reach the board
+    if (!panel_ok) {
+        ESP_LOGE(TAG, "no display: HUB75 init failed, only USB commands are available");
+        return;
+    }
     show_color("red", 255, 0, 0);
     show_color("green", 0, 255, 0);
     show_color("blue", 0, 0, 255);
