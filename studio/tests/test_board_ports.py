@@ -122,6 +122,34 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class FlashMd5Test(unittest.TestCase):
+    def make(self, **esp_kwargs):
+        flasher = Flasher("COM11")
+        flasher._esp = mock.Mock(**esp_kwargs)
+        return flasher
+
+    def test_md5_lowercased(self):
+        flasher = self.make(**{"flash_md5sum.return_value": "0123456789ABCDEF0123456789ABCDEF"})
+        self.assertEqual(flasher.flash_md5(0x10000, 4096), "0123456789abcdef0123456789abcdef")
+        flasher._esp.flash_md5sum.assert_called_once_with(0x10000, 4096)
+
+    def test_md5_timeout_is_interrupted(self):
+        flasher = self.make(**{"flash_md5sum.side_effect": FatalError("Timed out waiting for packet header")})
+        with self.assertRaises(BoardError) as cm, self.assertLogs("pixelboard.flasher", "ERROR"):
+            flasher.flash_md5(0x10000, 4096)
+        self.assertIn("燒錄中斷", cm.exception.user_message)
+
+    def test_md5_garbage_reply_rejected(self):
+        for reply in ("xyz", b"\x00" * 16, None, "0" * 31):
+            flasher = self.make(**{"flash_md5sum.return_value": reply})
+            with self.assertRaises(BoardError, msg=repr(reply)), self.assertLogs("pixelboard.flasher", "ERROR"):
+                flasher.flash_md5(0x10000, 4096)
+
+    def test_md5_needs_connection(self):
+        with self.assertRaises(BoardError):
+            Flasher("COM11").flash_md5(0x10000, 4096)
+
+
 class CloseResetTest(unittest.TestCase):
     def make(self):
         flasher = Flasher("COM11")

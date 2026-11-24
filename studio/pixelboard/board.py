@@ -1,4 +1,5 @@
 """Finding the board's serial port and user-facing board errors."""
+import hashlib
 from typing import NamedTuple, Optional
 
 # ESP32-S3 built-in USB Serial/JTAG.
@@ -47,6 +48,7 @@ _APP_DESC_MAGIC = 0xABCD5432
 
 NOTE_FIRST_INSTALL = "這塊板子還沒有安裝 pixel-board 韌體，會先安裝完整韌體（約 1 分鐘）"
 NOTE_UPDATE_FIRMWARE = "板子上的韌體版本不同，會一併更新韌體"
+NOTE_REPAIR_FIRMWARE = "板子上的韌體不完整或已損壞，會重新寫入韌體"
 NOTE_REPLACE_MUSIC = "板子上的音樂會被這份清單取代"
 NOTE_KEEP_MUSIC = "沒有加入音樂：保留板子上原本的音樂"
 NOTE_NO_MUSIC = "沒有加入音樂：安裝後板子上沒有背景音樂"
@@ -62,6 +64,9 @@ class AppInfo(NamedTuple):
 class BoardState(NamedTuple):
     app: Optional[AppInfo]
     partition_table: bytes
+    # MD5 of the board's app region equals the bundled app image; None when not checked
+    # (no bundled image given, or the board does not run pixel-board at all).
+    app_matches: Optional[bool] = None
 
 
 class FlashPlan(NamedTuple):
@@ -86,11 +91,20 @@ def parse_app_desc(image_head: bytes) -> Optional[AppInfo]:
     return AppInfo(project, version)
 
 
-def read_state(flasher) -> BoardState:
-    """Reads what the planner needs from a connected Flasher (raises BoardError)."""
+def read_state(flasher, bundled_app: Optional[bytes] = None) -> BoardState:
+    """Reads what the planner needs from a connected Flasher (raises BoardError).
+
+    With `bundled_app`, a board that runs pixel-board also gets its app region compared by MD5
+    (computed on the board) so a half-written app with an intact header is not "up to date".
+    """
     head = flasher.read(APP_OFFSET, APP_HEAD_SIZE)
     table = flasher.read(PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE)
-    return BoardState(parse_app_desc(head), table)
+    app = parse_app_desc(head)
+    app_matches = None
+    if bundled_app and app is not None and app.project == PROJECT_NAME:
+        board_md5 = flasher.flash_md5(APP_OFFSET, len(bundled_app))
+        app_matches = board_md5 == hashlib.md5(bundled_app).hexdigest()
+    return BoardState(app, table, app_matches)
 
 
 def plan_flash(state: BoardState, bundled: dict, bundled_app: AppInfo,
@@ -102,11 +116,12 @@ def plan_flash(state: BoardState, bundled: dict, bundled_app: AppInfo,
         regions = [(0x0, bundled["bootloader"]), (PARTITION_TABLE_OFFSET, bundled["partition_table"]),
                    (APP_OFFSET, bundled["app"])]
         notes = [NOTE_FIRST_INSTALL]
-    elif state.app.version != bundled_app.version or table_differs:
+    elif state.app.version != bundled_app.version or table_differs or state.app_matches is False:
         kind = "update_firmware"
         regions = [(PARTITION_TABLE_OFFSET, bundled["partition_table"])] if table_differs else []
         regions.append((APP_OFFSET, bundled["app"]))
-        notes = [NOTE_UPDATE_FIRMWARE]
+        same_firmware = state.app.version == bundled_app.version and not table_differs
+        notes = [NOTE_REPAIR_FIRMWARE if same_firmware else NOTE_UPDATE_FIRMWARE]
     else:
         kind = "update_content"
         regions = []

@@ -1,3 +1,4 @@
+import hashlib
 import pathlib
 import unittest
 
@@ -26,8 +27,8 @@ class ParseAppDescTest(unittest.TestCase):
 
 
 class PlanFlashTest(unittest.TestCase):
-    def plan(self, app, table=PART, gif=GIF, audio=AUDIO):
-        return plan_flash(BoardState(app, table), BUNDLED, BUNDLED_APP, gif, audio)
+    def plan(self, app, table=PART, gif=GIF, audio=AUDIO, app_matches=None):
+        return plan_flash(BoardState(app, table, app_matches), BUNDLED, BUNDLED_APP, gif, audio)
 
     def test_factory_demo_is_first_install(self):
         plan = self.plan(AppInfo("factory_demo", "v2"))
@@ -75,15 +76,42 @@ class PlanFlashTest(unittest.TestCase):
             self.plan(BUNDLED_APP, gif=None, audio=None)
         self.assertIn("沒有要燒錄的內容", cm.exception.user_message)
 
+    def test_same_version_but_app_md5_differs_rewrites_app(self):
+        plan = self.plan(BUNDLED_APP, gif=None, audio=None, app_matches=False)
+        self.assertEqual(plan.kind, "update_firmware")
+        self.assertEqual(plan.regions, [(0x10000, BUNDLED["app"])])
+        self.assertTrue(any("不完整" in n for n in plan.notes), plan.notes)
+
+    def test_corrupt_app_with_content_rewrites_app_first(self):
+        plan = self.plan(BUNDLED_APP, app_matches=False)
+        self.assertEqual(plan.kind, "update_firmware")
+        self.assertEqual(offsets(plan), [0x10000, 0x210000, 0x510000])
+
+    def test_app_md5_matches_updates_content_only(self):
+        plan = self.plan(BUNDLED_APP, audio=None, app_matches=True)
+        self.assertEqual(plan.kind, "update_content")
+        self.assertEqual(plan.regions, [(0x210000, GIF)])
+
+    def test_app_md5_matches_nothing_to_flash(self):
+        with self.assertRaises(BoardError) as cm:
+            self.plan(BUNDLED_APP, gif=None, audio=None, app_matches=True)
+        self.assertIn("沒有要燒錄的內容", cm.exception.user_message)
+
 
 class FakeFlasher:
-    def __init__(self, mem):
+    def __init__(self, mem, md5=None):
         self.mem = mem
+        self.md5 = md5
         self.reads = []
+        self.md5_calls = []
 
     def read(self, offset, size):
         self.reads.append((offset, size))
         return self.mem[offset]
+
+    def flash_md5(self, offset, size):
+        self.md5_calls.append((offset, size))
+        return self.md5
 
 
 class ReadStateTest(unittest.TestCase):
@@ -92,6 +120,32 @@ class ReadStateTest(unittest.TestCase):
         state = read_state(f)
         self.assertEqual(state, BoardState(AppInfo("pixel-board", "1.0.0"), PART))
         self.assertEqual(sorted(f.reads), [(0x8000, 0xC00), (0x10000, 256)])
+        self.assertIsNone(state.app_matches)
+        self.assertEqual(f.md5_calls, [])
+
+    def test_app_md5_matches_bundled(self):
+        app = BUNDLED["app"]
+        f = FakeFlasher({0x10000: APP_HEAD, 0x8000: PART}, md5=hashlib.md5(app).hexdigest())
+        state = read_state(f, app)
+        self.assertTrue(state.app_matches)
+        self.assertEqual(f.md5_calls, [(0x10000, len(app))])
+
+    def test_app_md5_differs_from_bundled(self):
+        app = BUNDLED["app"]
+        f = FakeFlasher({0x10000: APP_HEAD, 0x8000: PART}, md5=hashlib.md5(app + b"x").hexdigest())
+        self.assertIs(read_state(f, app).app_matches, False)
+
+    def test_no_md5_for_other_firmware(self):
+        f = FakeFlasher({0x10000: b"\xff" * 256, 0x8000: PART}, md5="0" * 32)
+        state = read_state(f, BUNDLED["app"])
+        self.assertIsNone(state.app_matches)
+        self.assertEqual(f.md5_calls, [])
+
+    def test_md5_error_propagates(self):
+        f = FakeFlasher({0x10000: APP_HEAD, 0x8000: PART})
+        f.flash_md5 = lambda offset, size: (_ for _ in ()).throw(BoardError("燒錄中斷"))
+        with self.assertRaises(BoardError):
+            read_state(f, BUNDLED["app"])
 
 
 if __name__ == "__main__":

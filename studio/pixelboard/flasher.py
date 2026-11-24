@@ -1,5 +1,6 @@
 """Thin wrapper over the esptool 5 Python API with progress reporting and friendly errors."""
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
@@ -177,6 +178,19 @@ class Flasher:
         if data is None or len(data) != size:
             raise BoardError(MSG_INTERRUPTED)
         return data
+
+    def flash_md5(self, offset: int, size: int) -> str:
+        """MD5 (lowercase hex) of `size` flash bytes at `offset`, computed by the board's stub."""
+        esp = self._require()
+        try:
+            digest = esp.flash_md5sum(offset, size)  # esptool scales its own timeout with size
+        except Exception as exc:  # noqa: BLE001
+            log.exception("md5 failed at 0x%x (+0x%x)", offset, size)
+            raise to_board_error(exc) from exc
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", digest):
+            log.error("unexpected md5 reply %r at 0x%x", digest, offset)
+            raise BoardError(MSG_INTERRUPTED)
+        return digest.lower()
 
     def hard_reset(self) -> None:
         esp = self._require()

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import pathlib
 import tempfile
@@ -28,9 +29,10 @@ class FakeFlasher(Flasher):
     instances = []
     on_piece = None  # optional callback(offset) run after each written piece
 
-    def __init__(self, port, progress=None, connect_error=None, blank=False):
+    def __init__(self, port, progress=None, connect_error=None, blank=False, app_md5=None):
         super().__init__(port, progress)
         self.connect_error, self.blank = connect_error, blank
+        self.app_md5 = app_md5  # None: the board's app equals the bundled one
         self.pieces, self.closed, self.reset = [], False, False
         FakeFlasher.instances.append(self)
 
@@ -43,6 +45,10 @@ class FakeFlasher(Flasher):
         if self.blank:
             return b"\xff" * size
         return {0x10000: APP_HEAD, 0x8000: PART}[offset][:size]
+
+    def flash_md5(self, offset, size):
+        assert offset == 0x10000, offset
+        return self.app_md5 or hashlib.md5(IMAGES["app"][:size]).hexdigest()
 
     def _write_piece(self, offset, data):
         self.pieces.append((offset, bytes(data)))
@@ -522,6 +528,17 @@ class FlashApiTest(ApiTestCase):
         self.assertTrue(FakeFlasher.instances[-1].closed)
         self.assertTrue(FakeFlasher.instances[-1].closed_with_reset)
         self.assertTrue(self.api.render_preview(PLACEMENT)["ok"])
+
+    def test_firmware_only_rewrites_corrupt_app(self):
+        def corrupt(port, progress=None):
+            return FakeFlasher(port, progress, app_md5="0" * 32)
+        api = self.make_api(flasher_factory=corrupt)
+        plan = api.prepare_flash(None, None, firmware_only=True)
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["kind"], "update_firmware")
+        self.assertEqual(plan["bytes"], len(IMAGES["app"]))
+        self.assertTrue(api.confirm_flash()["ok"])
+        self.assertEqual(written(FakeFlasher.instances[-1]), {0x10000: IMAGES["app"]})
 
     def test_firmware_only_must_be_bool(self):
         res = self.api.prepare_flash(PLACEMENT, None, firmware_only="yes")

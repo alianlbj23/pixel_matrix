@@ -465,7 +465,7 @@ class StudioApi:
             images = self._load_images()
             flasher = self._flasher_factory(port, self._progress)
             flasher.connect()
-            state = read_state(flasher)
+            state = read_state(flasher, images["app"])
             try:
                 plan = plan_flash(state, images, firmware.bundled_app_info(images), gif, audio)
             except BoardError as exc:
