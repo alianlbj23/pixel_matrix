@@ -1,0 +1,359 @@
+# Builds the firmware and PixelBoard Studio for every platform and publishes a GitHub release.
+#   push to main (allow-listed paths)        -> full pipeline + release v<studio/VERSION>.<run number>
+#   push to ci-test/**                       -> dry run: everything except the release job
+#   workflow_dispatch                        -> dry run unless dry_run is unticked (and the ref is main)
+# Security: every action is pinned by commit SHA; only the release job can write to the repo; values
+# from the event/expressions reach shell scripts through env, never by ${{ }} inside run:.
+name: release
+
+on:
+  push:
+    branches:
+      - main
+      - "ci-test/**"
+    paths:
+      - "studio/pixelboard/**"
+      - "studio/run_studio.py"
+      - "studio/PixelBoard-Studio.spec"
+      - "studio/requirements*.txt"
+      - "studio/VERSION"
+      - "studio/packaging/**"
+      - "studio/ci/**"
+      - "main/**"
+      - "CMakeLists.txt"
+      - "sdkconfig"
+      - "sdkconfig.defaults"
+      - "partitions.csv"
+      - "dependencies.lock"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: build and package only, do not publish a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: version
+        name: Compute version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          series="$(tr -d '[:space:]' < studio/VERSION)"
+          [[ "$series" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid studio/VERSION: '$series'"; exit 1; }
+          [[ "$RUN_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::invalid run number: '$RUN_NUMBER'"; exit 1; }
+          echo "version=$series.$RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Version: $series.$RUN_NUMBER"
+
+  firmware:
+    needs: test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    # Same ESP-IDF release as the local toolchain and dependencies.lock (5.5.6); the digest pins the
+    # exact image (Docker Hub tag v5.5.6, last updated 2026-10-16).
+    container:
+      image: espressif/idf:v5.5.6@sha256:bf72fe7a15c22849a9a94147301165a545fb8905d97c176cf748e3e4614cac84
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The container runs as root while the checkout belongs to the runner user; ESP-IDF runs git in
+      # the project directory, which git refuses for a repository owned by someone else.
+      - name: Mark checkout as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Container jobs skip the image entrypoint, so export.sh is sourced in each step.
+      - name: Build firmware (1st)
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          idf.py build
+          sha256sum build/pixel-board.bin | tee "$RUNNER_TEMP/first.sha256"
+
+      - name: Rebuild from scratch and compare (reproducible build)
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          idf.py fullclean
+          idf.py build
+          sha256sum build/pixel-board.bin | tee "$RUNNER_TEMP/second.sha256"
+          if ! cmp -s "$RUNNER_TEMP/first.sha256" "$RUNNER_TEMP/second.sha256"; then
+            echo "::error::pixel-board.bin differs between two clean builds (not reproducible)"
+            exit 1
+          fi
+          echo "Reproducible: both builds have the same pixel-board.bin"
+
+      # Paths share the build/ prefix, so the artifact keeps build/'s layout (bootloader/,
+      # partition_table/, pixel-board.bin, flasher_args.json) - what studio/firmware/ expects.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: firmware
+          path: |
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/pixel-board.bin
+            build/flasher_args.json
+          if-no-files-found: error
+
+  package:
+    needs: [test, version, firmware]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            key: windows-x64
+            python: "3.10"
+          - os: macos-latest
+            key: macos-arm64
+            python: "3.12"
+          - os: macos-15-intel
+            key: macos-x86_64
+            python: "3.12"
+          - os: ubuntu-22.04
+            key: linux-x86_64
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      KEY: ${{ matrix.key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The spec bundles studio/firmware/ (same layout as the ESP-IDF build/ directory).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: firmware
+          path: studio/firmware
+
+      - name: Write app version
+        run: |
+          set -euo pipefail
+          python studio/packaging/write_version.py "$VERSION" studio/pixelboard/_version.py
+          # A release must carry a plain X.Y.N version (never a -dev build, which skips update checks).
+          grep -Eq '^APP_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$' studio/pixelboard/_version.py
+          cat studio/pixelboard/_version.py
+
+      # PyInstaller copies the shared libraries that Qt's plugins link against from the build machine
+      # into the bundle; a library missing here is missing in the AppImage, and Qt then fails at start-up
+      # on hosts without it. libxcb-cursor0 is not on the runner image (needed by the xcb platform
+      # plugin since Qt 6.5); the rest are the other xcb platform plugin and QtWebEngine dependencies,
+      # listed so the bundle does not depend on what the runner image happens to ship.
+      - name: Install Qt libraries for bundling (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xkb1 libxcb-sync1 libxcb-glx0 \
+            libxkbcommon-x11-0 libxkbfile1 \
+            libnss3 libnspr4 libasound2 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libgbm1
+
+      - name: Install Python requirements
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # Same inputs as the local studio/build_exe.sh build (Python 3.10, Windows lock file).
+            args=(-r studio/requirements.txt -c studio/requirements-lock.txt)
+          else
+            case "$RUNNER_OS" in
+              macOS) platform_req=studio/requirements-macos.txt ;;
+              Linux) platform_req=studio/requirements-linux.txt ;;
+              *) echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+            esac
+            args=(-r studio/requirements.txt -r "$platform_req")
+            lock="studio/requirements-lock-$KEY.txt"
+            if [[ -f "$lock" ]]; then
+              args+=(-c "$lock")
+            else
+              echo "No $lock yet: transitive versions are resolved fresh (see the requirements-lock artifact)"
+            fi
+          fi
+          python -m pip install --disable-pip-version-check --no-input "${args[@]}"
+          mkdir -p ci-out/lock
+          python -m pip freeze --disable-pip-version-check | tr -d '\r' > "ci-out/lock/requirements-lock-$KEY.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: requirements-lock-${{ matrix.key }}
+          path: ci-out/lock/requirements-lock-${{ matrix.key }}.txt
+          if-no-files-found: error
+
+      - name: Run PyInstaller
+        working-directory: studio
+        run: python -m PyInstaller --noconfirm --log-level WARN PixelBoard-Studio.spec
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          mkdir -p ci-out/asset
+          cp studio/dist/PixelBoard-Studio.exe "ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.exe"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p ci-out/asset
+          ditto -c -k --keepParent "studio/dist/PixelBoard Studio.app" "ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.zip"
+
+      - name: Download pinned appimagetool and runtime (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/appimage-tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o runtime-x86_64 \
+            https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          sha256sum -c - <<'EOF'
+          ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool-x86_64.AppImage
+          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime-x86_64
+          EOF
+          chmod 755 appimagetool-x86_64.AppImage
+
+      - name: Package (Linux AppImage)
+        if: runner.os == 'Linux'
+        env:
+          # The runner has no FUSE: run appimagetool (itself an AppImage) by extracting it.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/appimage-tools"
+          APPIMAGE_RUNTIME_FILE="$tools/runtime-x86_64" bash studio/packaging/build_appimage.sh \
+            studio/dist/PixelBoard-Studio "$VERSION" \
+            "ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.AppImage" "$tools/appimagetool-x86_64.AppImage"
+
+      # --version prints the version and exits before any GUI or logging (run_studio.py).
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # Windowed (console=False) exe: stdout may not reach the shell, so only the exit code is checked.
+          "./ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.exe" --version
+
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # Run the app from the zip that is shipped, not from dist/.
+          unpacked="$RUNNER_TEMP/smoke"
+          rm -rf "$unpacked"
+          ditto -x -k "ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.zip" "$unpacked"
+          exe="$unpacked/PixelBoard Studio.app/Contents/MacOS/PixelBoard-Studio"
+          # The platform key promises an architecture; make sure the binary has it.
+          arch="${KEY#macos-}"
+          echo "Architectures: $(lipo -archs "$exe")"
+          lipo -archs "$exe" | tr ' ' '\n' | grep -qx "$arch" || { echo "::error::$exe is not $arch"; exit 1; }
+          got="$("$exe" --version)"
+          echo "--version printed: $got"
+          [[ "$got" == "$VERSION" ]] || { echo "::error::expected $VERSION, got '$got'"; exit 1; }
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        working-directory: ci-out/asset
+        run: |
+          set -euo pipefail
+          got="$(./PixelBoard-Studio-"$VERSION"-"$KEY".AppImage --appimage-extract-and-run --version)"
+          echo "--version printed: $got"
+          [[ "$got" == "$VERSION" ]] || { echo "::error::expected $VERSION, got '$got'"; exit 1; }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: studio-${{ matrix.key }}
+          path: ci-out/asset/PixelBoard-Studio-*
+          if-no-files-found: error
+
+  release:
+    needs: [version, package]
+    # Only main publishes; ci-test/** pushes and dry-run dispatches stop after packaging.
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      # Full history and tags: the release notes list the commits since the previous v* tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: studio-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Write latest.json and SHA256SUMS
+        run: python3 studio/ci/make_manifest.py "$VERSION" release-assets release-out
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          if prev="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null)"; then
+            echo "Changes since $prev:" > "$notes"
+            echo >> "$notes"
+            git log --pretty='- %s' "$prev..HEAD" >> "$notes"
+          else
+            echo "Changes:" > "$notes"
+            echo >> "$notes"
+            git log --pretty='- %s' -n 20 HEAD >> "$notes"
+          fi
+          cat "$notes"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          assets=()
+          for key in windows-x64.exe macos-arm64.zip macos-x86_64.zip linux-x86_64.AppImage; do
+            assets+=("release-assets/PixelBoard-Studio-$VERSION-$key")
+          done
+          gh release create "v$VERSION" "${assets[@]}" release-out/latest.json release-out/SHA256SUMS \
+            --target "$GITHUB_SHA" --latest \
+            --title "PixelBoard Studio $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

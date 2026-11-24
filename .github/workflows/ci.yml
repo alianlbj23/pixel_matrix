@@ -1,0 +1,45 @@
+# Tests on every push and pull request. release.yml reuses this workflow (workflow_call) as its
+# `test` job, so the release pipeline runs exactly the same checks.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test requirements
+        run: python -m pip install --disable-pip-version-check --no-input -r studio/requirements-ci.txt
+
+      # Same commands as do_tests in menu.sh; keep the two in sync.
+      - name: Host unit tests (C++)
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/host_test"
+          run() { echo "==> $1"; shift; g++ -std=c++17 -Wall -Wextra -Werror -I main "$@" -o "$out"; "$out"; }
+          run font     test/host/test_font.cpp     main/font5x7.cpp
+          run tone     test/host/test_tone.cpp     main/tone.cpp
+          run media    test/host/test_media.cpp    main/media.cpp
+          run crc32    test/host/test_crc32.cpp    main/crc32.cpp
+          run pxg      test/host/test_pxg.cpp      main/pxg.cpp main/crc32.cpp
+          run pxa      test/host/test_pxa.cpp      main/pxa.cpp main/crc32.cpp
+          run cmd      test/host/test_cmd.cpp      main/cmd.cpp
+          run identify test/host/test_identify.cpp main/identify.cpp main/font5x7.cpp
+
+      - name: Studio unit tests
+        run: python -m unittest discover -s studio/tests -t studio

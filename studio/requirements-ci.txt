@@ -1,0 +1,5 @@
+# PixelBoard Studio CI test job (.github/workflows/ci.yml, release.yml): only what the unit tests import.
+# Same pins as requirements.txt; keep them in sync.
+pillow==12.3.0
+esptool==5.6.0
+pyserial==3.5
