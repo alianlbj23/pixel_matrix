@@ -33,7 +33,8 @@ class PackGifCliTest(unittest.TestCase):
         rc = self.tool.main([str(src), str(out), "--chain", "2", "--brightness", "70", "--swap"])
         self.assertEqual(rc, 0)
         anim = pxg.unpack(out.read_bytes())
-        self.assertEqual((anim.chain, anim.brightness, anim.swap, len(anim.frames)), (2, 70, True, 1))
+        self.assertEqual((anim.chain, anim.brightness, anim.swap, len(anim.frames)), (2, 70, False, 1))
+        self.assertEqual(anim.panels, [(64, 0, 0), (0, 0, 0)])  # --swap = panel order reversed
 
     def test_bad_input_returns_1_and_writes_nothing(self):
         out = self.dir / "x.pxg"

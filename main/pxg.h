@@ -1,4 +1,4 @@
-// PXG1 animation format stored in the `gif` partition (written by PixelBoard Studio /
+// PXG animation format (v1 and v2) stored in the `gif` partition (written by PixelBoard Studio /
 // tools/pack_gif.py, see studio/pixelboard/pxg.py for the byte layout). Pure C++, host-testable.
 #pragma once
 
@@ -7,17 +7,20 @@
 
 namespace pxg {
 
-constexpr uint16_t kVersion = 1;
+constexpr uint16_t kVersion = 2;  // version written by the packer; v1 is still read
 constexpr uint16_t kPanelW = 64;
 constexpr uint16_t kPanelH = 32;
 constexpr uint16_t kMaxFrames = 64;
+constexpr uint8_t kMaxChain = 8;      // v2; v1 allows 1..2
+constexpr size_t kPanelEntrySize = 8;  // v2 arrangement table entry: i16 x, i16 y, u16 rotation, u16 0
 constexpr uint8_t kMinBrightness = 10;
 constexpr uint8_t kMaxBrightness = 128;
 constexpr size_t kHeaderSize = 32;
 
 // Points into the parsed buffer; valid as long as that buffer is.
 struct View {
-    uint8_t chain;              // 1 or 2 panels
+    uint8_t version;            // 1 or 2
+    uint8_t chain;              // v1: 1..2 panels, v2: 1..8
     uint8_t brightness;         // 10..128
     bool swap;                  // panels cabled right-to-left
     uint16_t frame_count;       // 1..64

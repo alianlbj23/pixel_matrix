@@ -151,15 +151,6 @@ class LayoutTest(GifTestCase):
         self.assertTrue(is_red(px(rgb, 64, 32, 60)))
         self.assertTrue(is_red(px(rgb, 64, 2, 32)))  # 20x20 fits 64x64 exactly
 
-    def test_render_chain_matches_row_canvas(self):
-        src = load(self.red_square_gif())
-        self.assertEqual(gifproc.render_chain(src, Placement(), 2), render(src, Placement(), ROW2))
-        for chain in (3, 0):
-            with self.assertRaises(GifError):
-                gifproc.render_chain(src, Placement(), chain)
-        with self.assertRaises(GifError):
-            gifproc.render_chain(src, Placement("split"), 1)
-
 
 class SplitTest(GifTestCase):
     """split: crop to visible content, cut in two, one half per 64x32 panel."""

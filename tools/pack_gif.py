@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "studio"))
 
-from pixelboard import gifproc, pxg  # noqa: E402
+from pixelboard import gifproc, layout, pxg  # noqa: E402
 
 log = logging.getLogger("pack_gif")
 
@@ -28,9 +28,16 @@ def main(argv=None) -> int:
 
     try:
         src = gifproc.load(args.input)
-        frames = gifproc.render_chain(src, gifproc.Placement(mode="split" if args.split else "whole"), args.chain)
-        data = pxg.pack(frames, args.chain, args.brightness, args.swap)
-    except gifproc.GifError as exc:
+        if args.chain not in (1, 2):
+            raise gifproc.GifError(f"面板數只能是 1 或 2（目前是 {args.chain}）")
+        if args.split and args.chain != 2:
+            raise gifproc.GifError("「每塊面板一份」需要 2 塊串接的面板")
+        placement = gifproc.Placement(mode="split" if args.split else "whole")
+        arr = layout.legacy_row(args.chain, args.swap)
+        w, h = layout.bounds(arr)
+        frames = [(layout.chain_frame(rgb, w, h, arr), ms) for rgb, ms in gifproc.render(src, placement, arr)]
+        data = pxg.pack(frames, arr, args.brightness, args.split)
+    except (gifproc.GifError, layout.LayoutError) as exc:
         log.error("%s", exc.user_message)
         return 1
     except pxg.PxgError as exc:

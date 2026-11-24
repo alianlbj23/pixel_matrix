@@ -12,7 +12,7 @@ import pathlib
 import threading
 from typing import Callable, Optional
 
-from . import firmware, gifproc, pxa, pxg
+from . import firmware, gifproc, layout, pxa, pxg
 from .board import BoardError, find_board_ports, list_system_ports, plan_flash, read_state
 from .flasher import Flasher, to_board_error
 
@@ -95,17 +95,20 @@ class StudioApi:
         if self._gif is None:
             raise gifproc.GifError(MSG_NO_GIF)
         placement, chain, brightness, swap = _layout_from(layout_dict)
-        return gifproc.render_chain(self._gif, placement, chain), chain, brightness, swap
+        arr = layout.legacy_row(chain, swap)
+        w, h = layout.bounds(arr)
+        frames = [(layout.chain_frame(rgb, w, h, arr), ms) for rgb, ms in gifproc.render(self._gif, placement, arr)]
+        return frames, arr, brightness, placement.mode == "split"
 
     def render_preview(self, layout: dict) -> dict:
         try:
-            frames, chain, brightness, _ = self._render(layout)
+            frames, arr, brightness, _ = self._render(layout)
         except gifproc.GifError as exc:
             return _fail(exc.user_message)
         except Exception as exc:  # noqa: BLE001
             log.exception("render_preview failed")
             return _fail(f"預覽失敗：{exc}")
-        return {"ok": True, "width": gifproc.PANEL_W * chain, "height": gifproc.PANEL_H,
+        return {"ok": True, "width": gifproc.PANEL_W * arr.n, "height": gifproc.PANEL_H,
                 "brightness": brightness,
                 "frames": [{"rgb_b64": base64.b64encode(rgb).decode("ascii"), "ms": ms} for rgb, ms in frames]}
 
@@ -189,8 +192,8 @@ class StudioApi:
             self._close_pending()
             gif = None
             if self._gif is not None:
-                frames, chain, brightness, swap = self._render(layout)
-                gif = pxg.pack(frames, chain, brightness, swap)
+                frames, arr, brightness, split = self._render(layout)
+                gif = pxg.pack(frames, arr, brightness, split)
             audio = pxa.pack([pxa.Track(t["name"], t["data"]) for t in self._tracks]) if self._tracks else None
             if not port:
                 ports = find_board_ports(self._list_ports())

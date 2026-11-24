@@ -173,13 +173,3 @@ def render(src: SourceGif, placement: Placement, arr: layout.Arrangement) -> lis
         out.append((canvas.tobytes(), ms))
     return out
 
-
-def render_chain(src: SourceGif, placement: Placement, chain: int) -> list:
-    """Transitional helper for the row-of-1-or-2 callers: chain-buffer frames (64*chain x 32)."""
-    if chain not in (1, 2):
-        raise GifError(f"面板數只能是 1 或 2（目前是 {chain}）")
-    if placement.mode == "split" and chain != 2:
-        raise GifError("「每塊面板一份」需要 2 塊串接的面板")
-    arr = layout.preset("row", chain)
-    cw, ch = layout.bounds(arr)
-    return [(layout.chain_frame(rgb, cw, ch, arr), ms) for rgb, ms in render(src, placement, arr)]

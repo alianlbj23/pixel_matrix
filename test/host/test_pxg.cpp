@@ -1,6 +1,7 @@
 // Host-side unit tests for main/pxg (no ESP-IDF needed). Run from the repo root:
 //   g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_pxg.cpp main/pxg.cpp main/crc32.cpp -o /tmp/t && /tmp/t
-// test/host/fixtures/sample.pxg is written by studio/pixelboard/pxg.py (chain 2, brightness 90,
+// test/host/fixtures/sample_v2.pxg is written by pxg.pack (3 panels (0,0,0) (64,0,0) (64,32,180), durations 100/200,
+// frame 0 starts with pixel 1,2,3). test/host/fixtures/sample.pxg is the v1 fixture, written by studio/pixelboard/pxg.py (chain 2, brightness 90,
 // durations 100/150/200, frame 0 starts with a red pixel) and keeps both sides in sync.
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +26,11 @@ static std::vector<uint8_t> fixture() {
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(f), {});
 }
 
+static std::vector<uint8_t> fixture_v2() {
+    std::ifstream f("test/host/fixtures/sample_v2.pxg", std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(f), {});
+}
+
 static uint16_t duration(const pxg::View &v, int i) {
     uint16_t d;
     std::memcpy(&d, reinterpret_cast<const uint8_t *>(v.durations) + 2 * i, 2);
@@ -39,12 +45,13 @@ static bool parses(const std::vector<uint8_t> &data) {
     return ok;
 }
 
-static void test_parse_fixture() {
+static void test_v1_fixture_still_parses() {
     const std::vector<uint8_t> data = fixture();
     CHECK(data.size() == 36904);
     pxg::View v{};
     const char *err = nullptr;
     CHECK(pxg::parse(data.data(), data.size(), &v, &err));
+    CHECK(v.version == 1);
     CHECK(v.chain == 2);
     CHECK(v.brightness == 90);
     CHECK(!v.swap);
@@ -55,15 +62,60 @@ static void test_parse_fixture() {
     CHECK(v.frames[v.frame_bytes] == 0 && v.frames[v.frame_bytes + 1] == 255);  // frame 1 green
 }
 
+static void test_parse_v2_fixture() {
+    const std::vector<uint8_t> data = fixture_v2();
+    // 32 header + 4 durations + 3*8 table + 2 frames of 3 panels
+    CHECK(data.size() == 32u + 4u + 24u + 2u * 192u * 32u * 3u);
+    pxg::View v{};
+    const char *err = nullptr;
+    CHECK(pxg::parse(data.data(), data.size(), &v, &err));
+    CHECK(v.version == 2);
+    CHECK(v.chain == 3);
+    CHECK(v.brightness == 90);
+    CHECK(!v.swap);
+    CHECK(v.frame_count == 2);
+    CHECK(duration(v, 0) == 100 && duration(v, 1) == 200);
+    CHECK(v.frame_bytes == 192u * 32u * 3u);
+    CHECK(v.frames[0] == 1 && v.frames[1] == 2 && v.frames[2] == 3);
+    CHECK(v.frames[v.frame_bytes] == 9);
+}
+
+static void test_rejects_v2_chain_9() {
+    std::vector<uint8_t> d = fixture_v2();
+    d[10] = 9;
+    CHECK(!parses(d));
+    d = fixture_v2();
+    d[10] = 0;
+    CHECK(!parses(d));
+}
+
+static void test_rejects_v2_inconsistent_length() {
+    std::vector<uint8_t> d = fixture_v2();
+    d[10] = 2;  // payload_len no longer matches chain 2
+    CHECK(!parses(d));
+    d = fixture_v2();
+    d.pop_back();
+    CHECK(!parses(d));
+}
+
+static void test_rejects_v3() {
+    std::vector<uint8_t> d = fixture_v2();
+    d[4] = 3;
+    CHECK(!parses(d));
+    d = fixture();
+    d[4] = 3;
+    CHECK(!parses(d));
+}
+
 static void test_rejects_bad_magic() {
     std::vector<uint8_t> d = fixture();
     d[0] = 'X';
     CHECK(!parses(d));
 }
 
-static void test_rejects_version_2() {
+static void test_v1_fixture_as_v2_rejected() {
     std::vector<uint8_t> d = fixture();
-    d[4] = 2;
+    d[4] = 2;  // v1 payload has no arrangement table, so the length check must fail
     CHECK(!parses(d));
 }
 
@@ -101,9 +153,13 @@ static void test_panel_x() {
 }
 
 int main() {
-    test_parse_fixture();
+    test_v1_fixture_still_parses();
+    test_parse_v2_fixture();
     test_rejects_bad_magic();
-    test_rejects_version_2();
+    test_v1_fixture_as_v2_rejected();
+    test_rejects_v2_chain_9();
+    test_rejects_v2_inconsistent_length();
+    test_rejects_v3();
     test_rejects_crc_mismatch();
     test_rejects_truncated();
     test_rejects_chain_3();
