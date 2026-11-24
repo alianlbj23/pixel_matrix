@@ -15,6 +15,11 @@
     </div>
   </header>
 
+  <div id="update-bar" class="update-bar" hidden>
+    <span id="update-status">下載新版本中…</span>
+    <progress id="update-progress" max="1" value="0"></progress>
+  </div>
+
   <main class="layout">
     <section class="card preview-card">
       <div class="card-head">
@@ -143,6 +148,16 @@
     <div class="dialog-actions">
       <button id="confirm-cancel" class="ghost">取消</button>
       <button id="confirm-ok" class="primary">開始燒錄</button>
+    </div>
+  </dialog>
+
+  <dialog id="update-dialog">
+    <h3>有新版本</h3>
+    <p id="update-text"></p>
+    <p id="update-work" class="warning" hidden>更新會重新開啟程式，目前加入的 GIF 和音樂需要重新加入（面板排列會保留）</p>
+    <div class="dialog-actions">
+      <button id="update-later" class="ghost">稍後</button>
+      <button id="update-ok" class="primary">更新</button>
     </div>
   </dialog>
 

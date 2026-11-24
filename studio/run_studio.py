@@ -54,11 +54,25 @@ def _linux_message_box(text: str) -> None:
     del app
 
 
+def _cleanup_old_update() -> None:
+    """Removes the previous version an update left behind (<exe>.old); packaged builds only, never fatal."""
+    log = logging.getLogger("studio")
+    try:
+        from pixelboard import updater
+
+        exe = updater.current_executable()
+        if exe is not None:
+            updater.cleanup_old(exe)
+    except Exception:  # noqa: BLE001 - a leftover file must not stop the app from starting
+        log.exception("cleaning up the previous version failed")
+
+
 def main() -> int:
     logging.basicConfig(filename=_log_path(), level=logging.INFO, encoding="utf-8",
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     log = logging.getLogger("studio")
     log.info("starting PixelBoard Studio")
+    _cleanup_old_update()
     try:
         from pixelboard.app import run
 

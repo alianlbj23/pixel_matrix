@@ -27,6 +27,14 @@ let identifyBusy = false;
 const flashState = { phase: null, stoppable: false, stopping: false };
 const isFlashing = () => flashState.phase !== null;
 
+// App update: the prompt is shown at most once per session and deferred while flashing.
+// updating: start_update is running (download + install); every .lockable control is locked meanwhile.
+const updateState = { updating: false, prompted: false, pending: false };
+const MSG_UPDATING = "正在更新程式，請稍候";
+const MSG_FLASH_LOCKED = "燒錄中，請先停止燒錄";
+const isLocked = () => isFlashing() || updateState.updating;
+const lockMessage = () => (updateState.updating ? MSG_UPDATING : MSG_FLASH_LOCKED);
+
 function placement() {
   return {
     mode: layout.split ? "split" : "whole", offset_x: layout.offset_x, offset_y: layout.offset_y,
@@ -70,10 +78,16 @@ window.studio = {
     syncStop();
   },
   onCloseBlocked(message) {
-    setStatus(typeof message === "string" && message ? message : "燒錄中，請先停止燒錄", "error");
+    setStatus(typeof message === "string" && message ? message : lockMessage(), "error");
+  },
+  onUpdateProgress(fraction) {
+    if (!updateState.updating) return;   // a late callback after start_update already answered
+    const f = Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0;
+    $("update-progress").value = f;
+    $("update-status").textContent = `下載新版本中… ${Math.round(f * 100)}%`;
   },
   onFilesDropped(paths) {
-    if (isFlashing()) { setStatus("燒錄中，請先停止燒錄", "error"); return; }
+    if (isLocked()) { setStatus(lockMessage(), "error"); return; }
     if (!Array.isArray(paths)) return;
     handleFiles(paths.filter((p) => typeof p === "string")).catch((err) => reportError("drop", err));
   },
@@ -192,11 +206,11 @@ function requestPreview() {
 async function refreshPreview() {
   preview.lut = buildLut(layout.brightness);
   if (!hasGif) { showEmptyPanels(); return; }
-  if (isFlashing()) return;   // render_preview is refused while flashing; redraw after unlock
+  if (isLocked()) return;   // render_preview is refused while flashing/updating; redraw after unlock
   const seq = ++previewSeq;
   const res = await api().render_preview(placement());
   if (seq !== previewSeq) return;   // a newer request is on its way
-  if (!res.ok && isFlashing()) return;   // refused because flashing started meanwhile; redrawn after unlock
+  if (!res.ok && isLocked()) return;   // refused because flashing/updating started meanwhile; redrawn after unlock
   if (!res.ok || !validPreview(res)) {
     setStatus(res.ok ? "預覽資料不正確，請重新加入 GIF" : res.message, "error", "preview");
     showEmptyPanels();
@@ -301,7 +315,7 @@ function placeTile(tile, x, y, w, h, s) {
 }
 
 function startTileDrag(e, tile, p) {
-  if (e.button !== 0 || isFlashing() || arrangeBusy || editor.drag) return;
+  if (e.button !== 0 || isLocked() || arrangeBusy || editor.drag) return;
   e.preventDefault();
   tile.setPointerCapture(e.pointerId);
   editor.drag = { tile, p, startX: e.clientX, startY: e.clientY, x: p.x, y: p.y, moved: false, ghost: null };
@@ -356,7 +370,7 @@ function onTileCancel() {
 
 // Runs one arrangement-changing API call and redraws from whatever arrangement it returns.
 async function arrangeCall(call) {
-  if (arrangeBusy || isFlashing()) return;
+  if (arrangeBusy || isLocked()) return;
   arrangeBusy = true;
   try {
     const res = await call();
@@ -378,7 +392,7 @@ async function arrangeCall(call) {
 }
 
 async function identifyPanels() {
-  if (identifyBusy || isFlashing()) return;
+  if (identifyBusy || isLocked()) return;
   identifyBusy = true;
   syncControls();
   setStatus("正在請板子顯示面板編號…");
@@ -422,8 +436,9 @@ function bindArrangement() {
 // Controls and the flashing lock
 // ---------------------------------------------------------------------------
 function syncControls() {
-  const locked = isFlashing();
-  document.body.classList.toggle("flashing", locked);
+  const locked = isLocked();
+  document.body.classList.toggle("flashing", isFlashing());
+  document.body.classList.toggle("updating", updateState.updating);
   for (const el of document.querySelectorAll(".lockable")) {
     const controls = el.matches("button, input, select") ? [el] : el.querySelectorAll("button, input, select");
     for (const c of controls) c.disabled = locked;
@@ -504,7 +519,7 @@ function bindControls() {
   $("step-fwd").addEventListener("click", () => step(1));
 
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || $("confirm").open || isFlashing()) return;
+    if (e.target.tagName === "INPUT" || $("confirm").open || $("update-dialog").open || isLocked()) return;
     const moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     const m = moves[e.key];
     if (m && hasGif) {
@@ -517,7 +532,7 @@ function bindControls() {
   const canvas = $("led");
   let drag = null;
   canvas.addEventListener("mousedown", (e) => {
-    if (!hasGif || isFlashing()) return;
+    if (!hasGif || isLocked()) return;
     drag = { x: e.clientX, y: e.clientY, ox: layout.offset_x, oy: layout.offset_y };
     canvas.classList.add("dragging");
   });
@@ -616,7 +631,7 @@ async function audition(index) {
 }
 
 async function handleFiles(paths) {
-  if (isFlashing()) { setStatus("燒錄中，請先停止燒錄", "error"); return; }
+  if (isLocked()) { setStatus(lockMessage(), "error"); return; }
   const gifs = paths.filter((p) => p.toLowerCase().endsWith(".gif"));
   const mp3s = paths.filter((p) => p.toLowerCase().endsWith(".mp3"));
   const others = paths.length - gifs.length - mp3s.length;
@@ -688,7 +703,7 @@ function confirmDialog(plan, firmwareOnly) {
 // Content flash (firmwareOnly = false) or the 安裝/更新韌體 button (firmwareOnly = true).
 // Editing is locked from the first call until every exit path below has run.
 async function runFlash(firmwareOnly) {
-  if (isFlashing()) return;
+  if (isLocked()) return;
   if (auditionIndex >= 0) stopAudition();
   setFlashPhase("prepare");
   $("progress").hidden = true;
@@ -728,6 +743,7 @@ async function runFlash(firmwareOnly) {
     setFlashPhase(null);
     requestPreview();
     findBoard();
+    offerDeferredUpdate();   // an update found while flashing is offered now (success, failure or stop)
   }
 }
 
@@ -741,6 +757,91 @@ async function stopFlash() {
   } catch (err) {
     reportError("stop_flash", err);
   }
+}
+
+// ---------------------------------------------------------------------------
+// App update
+// ---------------------------------------------------------------------------
+const UPDATE_POLL_MS = 5000;
+const UPDATE_POLL_MAX = 24;   // keep asking for 2 more minutes when the check is still running
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function validUpdateState(res) {
+  return res && res.ok === true && typeof res.available === "boolean" && typeof res.version === "string"
+    && typeof res.current === "string" && typeof res.has_work === "boolean";
+}
+
+// Runs once after start: check failures are only logged, never shown.
+async function checkForUpdate() {
+  try {
+    let res = await api().check_update();
+    for (let i = 0; res && res.checking === true && i < UPDATE_POLL_MAX; i++) {
+      await sleep(UPDATE_POLL_MS);
+      res = await api().get_update_state();
+    }
+    offerUpdate(res);
+  } catch (err) {
+    console.error("check_update", err);
+  }
+}
+
+async function offerDeferredUpdate() {
+  if (!updateState.pending) return;
+  try {
+    offerUpdate(await api().get_update_state());   // fresh has_work: GIF/music may have changed meanwhile
+  } catch (err) {
+    console.error("get_update_state", err);
+  }
+}
+
+function offerUpdate(res) {
+  if (!validUpdateState(res)) {
+    if (res) console.error("bad update state", res);
+    return;
+  }
+  if (!res.available || updateState.prompted || updateState.updating) return;
+  if (isFlashing() || res.flashing === true) { updateState.pending = true; return; }
+  updateState.pending = false;
+  updateState.prompted = true;
+  $("update-text").textContent = `目前有新版本 ${res.version}（你的版本 ${res.current}），是否更新？`;
+  $("update-work").hidden = !res.has_work;
+  const dlg = $("update-dialog");
+  const done = (ok) => {
+    if (dlg.open) dlg.close();
+    if (ok) runUpdate().catch((err) => reportError("update", err));
+  };
+  $("update-ok").onclick = () => done(true);
+  $("update-later").onclick = () => done(false);
+  dlg.oncancel = () => done(false);   // Esc = 稍後
+  dlg.showModal();
+}
+
+async function runUpdate() {
+  if (isLocked()) { setStatus(lockMessage(), "error"); return; }
+  if (auditionIndex >= 0) stopAudition();
+  updateState.updating = true;
+  $("update-progress").value = 0;
+  $("update-status").textContent = "下載新版本中…";
+  $("update-bar").hidden = false;
+  syncControls();
+  setStatus("");
+  let res = null;
+  try {
+    res = await api().start_update();   // on success the backend closes this window
+  } catch (err) {
+    reportError("start_update", err);
+  }
+  if (res && res.ok) {
+    $("update-status").textContent = typeof res.message === "string" ? res.message : "正在開啟新版本…";
+    $("update-progress").value = 1;
+    return;   // stays locked until the window closes
+  }
+  updateState.updating = false;
+  $("update-bar").hidden = true;
+  syncControls();
+  requestPreview();
+  if (res) setStatus(res.message, res.installed === true ? "ok" : "error");
 }
 
 // ---------------------------------------------------------------------------
@@ -763,4 +864,5 @@ window.addEventListener("pywebviewready", async () => {
   syncControls();
   refreshPreview().catch((err) => reportError("preview", err));
   findBoard();
+  checkForUpdate();
 });

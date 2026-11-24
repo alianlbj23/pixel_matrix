@@ -189,6 +189,12 @@ button.attention { outline: 2px solid var(--warn); animation: attention 0.8s eas
 .warning[hidden] { display: none; }
 
 /* ---- Locked while flashing -------------------------------------------- */
-body.flashing .lockable { opacity: 0.4; pointer-events: none; filter: grayscale(0.6); }
+body.flashing .lockable, body.updating .lockable { opacity: 0.4; pointer-events: none; filter: grayscale(0.6); }
 .stop-note { margin: 0; font-size: 13px; }
 .stop-note[hidden], #stop[hidden] { display: none; }
+
+/* ---- App update ------------------------------------------------------- */
+.update-bar { display: flex; align-items: center; gap: 14px; padding: 10px 24px; background: #1a2a45; border-bottom: 1px solid var(--line); }
+.update-bar[hidden] { display: none; }
+.update-bar progress { flex: 1; }
+#update-status { white-space: nowrap; }

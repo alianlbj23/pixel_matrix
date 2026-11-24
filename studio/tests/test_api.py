@@ -3,13 +3,16 @@ import hashlib
 import json
 import pathlib
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 
 from PIL import Image
 
-from pixelboard import layout, pxa, pxg, serialcmd
-from pixelboard.app import MSG_LOCKED, MSG_STOPPED, StudioApi
+from pixelboard import app as app_module
+from pixelboard import layout, pxa, pxg, serialcmd, updater
+from pixelboard.app import MSG_LOCKED, MSG_STOPPED, MSG_UPDATE_WHILE_FLASHING, MSG_UPDATING, StudioApi
 from pixelboard.board import AUDIO_OFFSET, BOARD_PID, BOARD_VID, GIF_OFFSET, BoardError, PortInfo
 from pixelboard.flasher import MSG_PORT_BUSY, Flasher
 
@@ -106,9 +109,14 @@ class FakeClock:
 
 
 class FakeWindow:
-    def __init__(self, error=None):
+    def __init__(self, error=None, on_destroy=None):
         self.js = []
         self.error = error
+        self.on_destroy = on_destroy  # pywebview runs the closing handlers inside destroy()
+        self.destroyed = None
+
+    def destroy(self):
+        self.destroyed = self.on_destroy() if self.on_destroy else True
 
     def evaluate_js(self, code):
         self.js.append(code)
@@ -670,6 +678,331 @@ class FlashApiTest(ApiTestCase):
         self.assertTrue(any(js.endswith(", false)") for js in writes), writes)
         self.assertTrue(any(js.endswith(", true)") for js in writes), writes)
         self.assertEqual(writes[-1], 'window.studio.onProgress("write", 1.000, true)')
+
+
+KEY = "linux-x86_64"
+NEW_ASSET = updater.Asset(
+    "PixelBoard-Studio-1.2.58-linux-x86_64.AppImage",
+    updater.DOWNLOAD_PREFIX + "v1.2.58/PixelBoard-Studio-1.2.58-linux-x86_64.AppImage", 3, "0" * 64)
+MANIFEST = updater.Manifest("1.2.58", {KEY: NEW_ASSET})
+
+
+def update_failed(reason):
+    return {"ok": False, "message": f"更新失敗：{reason}，你可以繼續使用目前的版本"}
+
+
+class FakeUpdater:
+    """Stands in for updater.check/download/install; download can be held on `gate`."""
+
+    def __init__(self, manifest=MANIFEST):
+        self.manifest = manifest
+        self.check_calls, self.check_threads, self.downloads, self.installs = [], [], [], []
+        self.check_error = self.download_error = self.install_error = None
+        self.gate = None
+        self.started = threading.Event()
+
+    def check(self, current):
+        self.check_calls.append(current)
+        self.check_threads.append(threading.current_thread())
+        if self.check_error:
+            raise self.check_error
+        return self.manifest
+
+    def download(self, asset, dest_dir, progress):
+        self.started.set()
+        for f in (0.0, 0.001, 0.002, 0.5, 0.505, 1.0):
+            progress(f)
+        if self.gate is not None:
+            self.gate.wait(5)
+        if self.download_error:
+            raise self.download_error
+        path = pathlib.Path(dest_dir) / asset.name
+        path.write_bytes(b"new")
+        self.downloads.append((asset, path))
+        return path
+
+    def install(self, downloaded, key, exe_path):
+        self.installs.append((pathlib.Path(downloaded).read_bytes(), key, exe_path))
+        if self.install_error:
+            raise self.install_error
+
+
+class UpdateApiTest(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.exe = self.dir / "PixelBoard-Studio.AppImage"
+        self.fake = FakeUpdater()
+        self.api = self.update_api()
+        self.window = FakeWindow()
+        self.api._window = self.window
+
+    def update_api(self, fake=None, **kwargs):
+        fake = fake or self.fake
+        args = dict(updater_check=fake.check, updater_download=fake.download, updater_install=fake.install,
+                    current_version="1.2.57", platform_key=lambda: KEY, executable=lambda: self.exe)
+        args.update(kwargs)
+        api = self.make_api(**args)
+        api._quit = mock.Mock()
+        return api
+
+    def progress_js(self):
+        return [js for js in self.window.js if js.startswith("window.studio.onUpdateProgress(")]
+
+    def test_check_update_available(self):
+        res = self.api.check_update()
+        self.assertEqual(res, {"ok": True, "available": True, "version": "1.2.58", "current": "1.2.57",
+                               "has_work": False, "checking": False, "flashing": False, "updating": False})
+        self.assertEqual(self.fake.check_calls, ["1.2.57"])
+        self.assertIsNot(self.fake.check_threads[0], threading.current_thread())  # background thread
+        self.assertTrue(self.api.check_update()["available"])
+        self.assertEqual(self.fake.check_calls, ["1.2.57"])  # checked once per session
+        self.assertEqual(self.api.get_update_state(), res)
+
+    def test_check_update_none_or_error(self):
+        api = self.update_api(FakeUpdater(manifest=None))
+        res = api.check_update()
+        self.assertEqual((res["ok"], res["available"], res["version"], res["checking"]), (True, False, "", False))
+        broken = FakeUpdater()
+        broken.check_error = RuntimeError("boom")
+        api = self.update_api(broken)
+        with self.assertLogs("pixelboard.app", "ERROR"):
+            res = api.check_update()
+        self.assertEqual((res["ok"], res["available"]), (True, False))
+
+    def test_check_update_still_running(self):
+        gate = threading.Event()
+        fake = FakeUpdater()
+        fake.check = lambda current: gate.wait(5) and MANIFEST
+        api = self.update_api(fake)
+        with mock.patch.object(app_module, "UPDATE_CHECK_WAIT_S", 0.01):
+            res = api.check_update()
+        self.assertEqual((res["ok"], res["available"], res["checking"]), (True, False, True))
+        gate.set()
+        deadline = time.monotonic() + 2
+        while api.get_update_state()["checking"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(api.get_update_state()["available"])
+
+    def test_update_deferred_while_flashing(self):
+        self.api.open_gif(str(self.gif))
+        self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])
+        self.assertEqual(self.api.start_update(), {"ok": False, "message": MSG_UPDATE_WHILE_FLASHING})
+        self.assertEqual(MSG_UPDATE_WHILE_FLASHING, "燒錄中不能更新，請等燒錄結束")
+        res = self.api.check_update()
+        self.assertTrue(res["available"])
+        self.assertTrue(res["flashing"])
+        self.assertEqual(self.fake.downloads, [])
+        self.assertTrue(self.api.confirm_flash()["ok"])
+        state = self.api.get_update_state()
+        self.assertEqual((state["available"], state["flashing"], state["has_work"]), (True, False, True))
+        self.assertTrue(self.api.start_update()["ok"])
+
+    def test_flash_rejected_while_updating(self):
+        self.api.open_gif(str(self.gif))
+        mp3 = self.write("a.mp3", fx.stereo_44k(3))
+        self.api.add_tracks([mp3, mp3])
+        self.api.check_update()
+        self.fake.gate = threading.Event()
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(self.api.start_update()))
+        worker.start()
+        try:
+            self.assertTrue(self.fake.started.wait(2))
+            busy = {"ok": False, "message": MSG_UPDATING}
+            self.assertEqual(MSG_UPDATING, "正在更新程式，請稍候")
+            self.assertEqual(self.api.prepare_flash(PLACEMENT, None), busy)
+            self.assertEqual(self.api.prepare_flash(None, None, firmware_only=True), busy)
+            self.assertEqual(self.api.confirm_flash(), busy)
+            self.assertEqual(FakeFlasher.instances, [])
+            edits = {
+                "open_gif": lambda: self.api.open_gif(str(self.gif)),
+                "add_tracks": lambda: self.api.add_tracks([mp3]),
+                "remove_track": lambda: self.api.remove_track(0),
+                "move_track": lambda: self.api.move_track(0, 1),
+                "set_panel_count": lambda: self.api.set_panel_count(2),
+                "apply_preset": lambda: self.api.apply_preset("column"),
+                "move_panel": lambda: self.api.move_panel(0, 10, 10),
+                "rotate_panel": lambda: self.api.rotate_panel(0),
+                "render_preview": lambda: self.api.render_preview(PLACEMENT),
+                "identify": lambda: self.api.identify("COM11"),
+                "start_update": self.api.start_update,
+            }
+            for name, call in edits.items():
+                self.assertEqual(call(), busy, name)
+            self.assertEqual(self.identify_calls, [])
+            self.assertTrue(self.api.get_update_state()["updating"])
+            with self.assertLogs("pixelboard.app", "INFO"):
+                self.assertFalse(self.api.can_close())
+            self.assertIn(f"window.studio.onCloseBlocked({json.dumps(MSG_UPDATING)})",
+                          self.window.wait_js(len(self.progress_js()) + 1))
+        finally:
+            self.fake.gate.set()
+            worker.join(5)
+        self.assertTrue(result["ok"])
+        self.api._quit.assert_called_once_with()
+
+    def test_update_failure_message_and_unlock(self):
+        self.api.open_gif(str(self.gif))
+        self.api.check_update()
+        cases = [
+            ("download", updater.UpdateError(updater.MSG_NETWORK, "timed out"), updater.MSG_NETWORK),
+            ("install", updater.UpdateError(updater.MSG_INSTALL, "rename failed"), updater.MSG_INSTALL),
+            ("install", RuntimeError("boom"), "發生未預期的錯誤"),
+        ]
+        for step, error, reason in cases:
+            with self.subTest(step=step, reason=reason):
+                self.fake.download_error = error if step == "download" else None
+                self.fake.install_error = error if step == "install" else None
+                with self.assertLogs("pixelboard.app", "WARNING"):
+                    res = self.api.start_update()
+                self.assertEqual(res, update_failed(reason))
+                self.api._quit.assert_not_called()
+                state = self.api.get_update_state()
+                self.assertEqual((state["updating"], state["available"]), (False, True))
+                for _, path in self.fake.downloads:
+                    self.assertFalse(path.parent.exists(), path)  # the download folder is removed
+                self.assertTrue(self.api.can_close())
+                self.assertTrue(self.api.render_preview(PLACEMENT)["ok"])
+        self.assertEqual(len(self.fake.installs), 2)
+        self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])
+        self.assertTrue(self.api.confirm_flash()["ok"])
+
+    def test_update_success_quits(self):
+        self.api.check_update()
+        res = self.api.start_update()
+        self.assertTrue(res["ok"])
+        self.assertEqual(self.fake.installs, [(b"new", KEY, self.exe)])
+        self.api._quit.assert_called_once_with()
+        (_, path), = self.fake.downloads
+        self.assertFalse(path.parent.exists())
+        self.assertEqual(self.progress_js(), ["window.studio.onUpdateProgress(0.000)",
+                                              "window.studio.onUpdateProgress(0.500)",
+                                              "window.studio.onUpdateProgress(1.000)"])
+
+    def test_update_progress_throttled_by_time(self):
+        api = self.update_api()
+        api._window = self.window
+
+        def download(asset, dest_dir, progress):
+            for fraction, step in ((0.1, 0), (0.101, 0.25), (0.102, 0.05), (0.103, 0.2), (0.104, 0)):
+                progress(fraction)  # sent: first, after 200 ms, else dropped (< 1 % change)
+                self.clock.now += step
+            return self.fake.download(asset, dest_dir, lambda f: None)
+
+        api._updater_download = download
+        api.check_update()
+        self.assertTrue(api.start_update()["ok"])
+        self.assertEqual(self.progress_js(), ["window.studio.onUpdateProgress(0.100)",
+                                              "window.studio.onUpdateProgress(0.102)",
+                                              "window.studio.onUpdateProgress(0.104)"])
+
+    def test_has_work_flag(self):
+        self.assertFalse(self.api.check_update()["has_work"])
+        self.api.open_gif(str(self.gif))
+        self.assertTrue(self.api.get_update_state()["has_work"])
+        api = self.update_api()
+        api.add_tracks([self.write("a.mp3", fx.stereo_44k(3))])
+        self.assertTrue(api.check_update()["has_work"])
+        api.remove_track(0)
+        self.assertFalse(api.get_update_state()["has_work"])
+
+    def test_update_restart_failure_keeps_running(self):
+        self.api.check_update()
+        self.fake.install_error = updater.UpdateError(updater.MSG_RESTART, "spawn failed")
+        with self.assertLogs("pixelboard.app", "WARNING"):
+            res = self.api.start_update()
+        self.assertEqual(res, {"ok": False, "installed": True, "message": updater.MSG_RESTART})
+        self.api._quit.assert_not_called()
+        state = self.api.get_update_state()
+        self.assertEqual((state["updating"], state["available"]), (False, False))
+        self.assertTrue(self.api.can_close())
+        self.assertFalse(self.api.start_update()["ok"])
+        self.assertEqual(len(self.fake.installs), 1)
+
+    def test_open_url_false_means_no_browser(self):
+        with mock.patch.object(app_module.webbrowser, "open", return_value=False):
+            with self.assertRaises(OSError):
+                app_module._open_url(updater.RELEASES_URL)
+        with mock.patch.object(app_module.webbrowser, "open", return_value=True) as opened:
+            app_module._open_url(updater.RELEASES_URL)
+        opened.assert_called_once_with(updater.RELEASES_URL)
+
+    def test_update_no_permission_messages(self):
+        for browser_ok, reason in ((False, updater.MSG_NO_PERMISSION_NO_BROWSER),
+                                   (True, updater.MSG_NO_PERMISSION)):
+            with self.subTest(browser_ok=browser_ok):
+                api = self.update_api(updater_install=None)  # the real updater.install
+                api.check_update()
+                with mock.patch.object(updater, "_dir_writable", return_value=False), \
+                        mock.patch.object(app_module.webbrowser, "open", return_value=browser_ok) as opened, \
+                        self.assertLogs("pixelboard", "WARNING"):
+                    res = api.start_update()
+                opened.assert_called_once_with(updater.RELEASES_URL)
+                self.assertEqual(res, update_failed(reason))
+                if not browser_ok:
+                    self.assertNotIn("已打開", res["message"])
+                    self.assertIn(updater.RELEASES_URL, res["message"])
+                api._quit.assert_not_called()
+
+    def test_default_install_uses_detached_spawn(self):
+        api = self.update_api(updater_install=None)
+        api.check_update()
+        with mock.patch.object(updater, "install") as install:
+            self.assertTrue(api.start_update()["ok"])
+        (downloaded, key, exe), kwargs = install.call_args
+        self.assertEqual((downloaded.name, key, exe), (NEW_ASSET.name, KEY, self.exe))
+        self.assertIs(kwargs["spawn"], updater.spawn_detached)
+        self.assertIs(kwargs["open_url"], app_module._open_url)
+
+    def test_update_from_source_rejected(self):
+        api = self.update_api(executable=lambda: None)
+        api.check_update()
+        with self.assertLogs("pixelboard.app", "WARNING"):
+            res = api.start_update()
+        self.assertEqual(res, update_failed("目前是從原始碼執行，無法自動更新"))
+        self.assertEqual(self.fake.downloads, [])
+        self.assertFalse(api.get_update_state()["updating"])
+        with mock.patch.object(updater, "current_executable", return_value=None) as current:
+            api = self.update_api(executable=None)
+        api.check_update()
+        with self.assertLogs("pixelboard.app", "WARNING"):
+            self.assertFalse(api.start_update()["ok"])
+        current.assert_called()
+
+    def test_start_update_without_new_version(self):
+        api = self.update_api(FakeUpdater(manifest=None))
+        api.check_update()
+        self.assertEqual(api.start_update(), {"ok": False, "message": "目前沒有可以安裝的新版本"})
+        self.assertFalse(api.get_update_state()["updating"])
+
+    def test_quit_destroys_window_and_close_allowed(self):
+        api = self.make_api(updater_check=self.fake.check, updater_download=self.fake.download,
+                            updater_install=self.fake.install, current_version="1.2.57",
+                            platform_key=lambda: KEY, executable=lambda: self.exe)
+        window = FakeWindow(on_destroy=lambda: api.can_close())
+        api._window = window
+        api.check_update()
+        self.assertTrue(api.start_update()["ok"])
+        self.assertIs(window.destroyed, True)  # can_close() let the destroy() through
+
+
+class RunStudioCleanupTest(unittest.TestCase):
+    def test_cleanup_old_at_startup(self):
+        import run_studio
+
+        exe = pathlib.Path("/opt/PixelBoard-Studio.AppImage")
+        with mock.patch.object(updater, "current_executable", return_value=exe), \
+                mock.patch.object(updater, "cleanup_old") as cleanup:
+            run_studio._cleanup_old_update()
+        cleanup.assert_called_once_with(exe)
+        with mock.patch.object(updater, "current_executable", return_value=None), \
+                mock.patch.object(updater, "cleanup_old") as cleanup:
+            run_studio._cleanup_old_update()
+        cleanup.assert_not_called()
+        with mock.patch.object(updater, "current_executable", return_value=exe), \
+                mock.patch.object(updater, "cleanup_old", side_effect=RuntimeError("boom")), \
+                self.assertLogs("studio", "ERROR"):
+            run_studio._cleanup_old_update()  # never crashes the start
 
 
 if __name__ == "__main__":

@@ -7,6 +7,9 @@ Flashing is two steps so the user can confirm what will be written:
 prepare_flash() connects and plans, then confirm_flash() writes (or cancel_flash()).
 From prepare_flash() until confirm/cancel finishes every editing method is locked
 (MSG_LOCKED); stop_flash() may be called from another thread while confirm_flash() writes.
+App updates: check_update() runs the network check once on a background thread; start_update()
+downloads and installs (refused while flashing; while it runs flashing and editing are refused
+with MSG_UPDATING) and quits the window so the new version can start.
 pywebview calls each API method on its own thread, so shared state is guarded by _state.
 """
 import base64
@@ -15,12 +18,15 @@ import logging
 import math
 import os
 import pathlib
+import shutil
 import sys
+import tempfile
 import threading
 import time
+import webbrowser
 from typing import Callable, Optional
 
-from . import firmware, gifproc, layout, paths, pxa, pxg, serialcmd
+from . import firmware, gifproc, layout, paths, pxa, pxg, serialcmd, updater, version
 from .board import MSG_NOTHING, BoardError, find_board_ports, list_system_ports, plan_flash, read_state
 from .flasher import Flasher, to_board_error
 
@@ -44,13 +50,43 @@ MSG_ROTATE_OVERLAP = "轉了之後會跟其他面板重疊，請先把它移開�
 MSG_SAVE_FAILED = "排列已更新，但無法儲存設定檔（下次開啟會恢復舊排列）："
 MSG_IDENTIFY_SHOWING = "辨識畫面還在顯示中，請稍候"
 MSG_FIRMWARE_UP_TO_DATE = "板子上的韌體已經是最新版，不需要更新"
+MSG_UPDATE_WHILE_FLASHING = "燒錄中不能更新，請等燒錄結束"
+MSG_UPDATING = "正在更新程式，請稍候"
 MAX_TRACK_BYTES = pxa.CAPACITY
 MAX_CANVAS = 1024          # LED px per side; bounds memory for previews and a corrupt layout.json
 IDENTIFY_HOLD_S = 5.5      # firmware shows the identify screen 5 s; a second command meanwhile replies late
+MSG_UPDATE_FAILED = "更新失敗：{reason}，你可以繼續使用目前的版本"
+MSG_NO_UPDATE = "目前沒有可以安裝的新版本"
+MSG_FROM_SOURCE = "目前是從原始碼執行，無法自動更新"
+MSG_UNEXPECTED = "發生未預期的錯誤"
+UPDATE_CHECK_WAIT_S = 20.0       # check_update() answers "checking" after this; the UI then polls
+UPDATE_PROGRESS_STEP = 0.01      # onUpdateProgress is sent when progress moved >= 1 % ...
+UPDATE_PROGRESS_INTERVAL_S = 0.2  # ... or this long after the last one
 
 
 def _fail(message: str) -> dict:
     return {"ok": False, "message": message}
+
+
+def _open_url(url: str) -> None:
+    """Opens url in the browser; raises OSError when no browser could be started.
+
+    webbrowser.open() reports failure by returning False, which updater.install only notices as an exception.
+    """
+    if not webbrowser.open(url):
+        raise OSError(f"no web browser could open {url}")
+
+
+def _default_check(current: str):
+    return updater.check(current, updater.http_get)
+
+
+def _default_download(asset, dest_dir, progress):
+    return updater.download(asset, dest_dir, updater.open_stream, progress)
+
+
+def _default_install(downloaded, key, exe_path):
+    updater.install(downloaded, key, exe_path, spawn=updater.spawn_detached, open_url=_open_url)
 
 
 def gui_for(platform: str) -> str:
@@ -131,7 +167,9 @@ def _keep_panels(rgb: bytes, cw: int, ch: int, rects: list) -> bytes:
 class StudioApi:
     def __init__(self, list_ports: Callable = None, flasher_factory: Callable = None,
                  images_loader: Callable = None, layout_path=None, identify_fn: Callable = None,
-                 clock: Callable = None):
+                 clock: Callable = None, updater_check: Callable = None, updater_download: Callable = None,
+                 updater_install: Callable = None, current_version: Optional[str] = None,
+                 platform_key: Callable = None, executable: Callable = None):
         self._window = None  # set by run(); underscore keeps it out of the JS bridge
         self._list_ports = list_ports or list_system_ports
         self._flasher_factory = flasher_factory or Flasher
@@ -148,6 +186,20 @@ class StudioApi:
         self._tracks: list = []   # dicts: name, data, rate, channels
         self._arr = _load_arrangement(self._layout_path)
         self._pending = None      # (flasher, plan) between prepare_flash and confirm_flash
+        # App update. updater_check(current) -> Manifest | None, updater_download(asset, dest_dir, progress)
+        # -> Path, updater_install(downloaded, key, exe_path); the defaults are the real updater functions.
+        self._updater_check = updater_check or _default_check
+        self._updater_download = updater_download or _default_download
+        self._updater_install = updater_install or _default_install
+        self._current_version = current_version if current_version is not None else version.current_version()
+        self._platform_key = platform_key or updater.platform_key
+        self._executable = executable or updater.current_executable
+        self._update_checked = threading.Event()  # set once the background check has finished
+        self._update_thread = None
+        self._update_manifest = None   # newer release found by the check (guarded by _state)
+        self._update_installed = False  # installed but the new process could not be started
+        self._updating = False          # start_update() running: flashing and editing refused
+        self._quitting = False          # update installed, window being destroyed: closing allowed
 
     # ---- progress / UI bridge -------------------------------------------------
     def _progress(self, stage: str, fraction: float, stoppable: bool = False) -> None:
@@ -156,7 +208,11 @@ class StudioApi:
                                      f"{'true' if stoppable else 'false'})")
 
     def _locked(self) -> Optional[dict]:
-        return _fail(MSG_LOCKED) if self._flashing else None
+        if self._flashing:
+            return _fail(MSG_LOCKED)
+        if self._updating:
+            return _fail(MSG_UPDATING)
+        return None
 
     def pick_files(self, kind: str) -> dict:
         """Opens a file dialog; kind is "gif" or "mp3". Returns {"ok", "paths"}."""
@@ -458,6 +514,8 @@ class StudioApi:
         try:
             self._close_pending()
             with self._state:
+                if self._updating:
+                    return _fail(MSG_UPDATING)
                 self._flashing = True  # snapshot below is what gets written; no edits from now on
                 self._stop.clear()
                 src, arr, tracks = self._gif, self._arr, list(self._tracks)
@@ -506,6 +564,9 @@ class StudioApi:
 
     def confirm_flash(self) -> dict:
         """Writes the prepared plan. A stop_flash() during gif/audio ends it early (board is reset)."""
+        with self._state:
+            if self._updating:  # cannot have a plan (start_update is refused while flashing); defensive
+                return _fail(MSG_UPDATING)
         if not self._lock.acquire(blocking=False):
             return _fail(MSG_BUSY)
         reset_done = False
@@ -539,19 +600,23 @@ class StudioApi:
         return {"ok": True}
 
     def can_close(self) -> bool:
-        """Window close requested (pywebview `closing` handler): False cancels it while flashing.
+        """Window close requested (pywebview `closing` handler, also run by window.destroy()):
+        False cancels it while flashing or updating (except the update's own quit).
 
         Runs on the GUI thread, so the UI message is sent from a helper thread: evaluate_js
         waits for the GUI thread and would deadlock here.
         """
         with self._state:
-            flashing = self._flashing
-        if not flashing:
-            return True
-        log.info("window close blocked: flashing in progress")
+            if self._flashing:
+                message = MSG_LOCKED
+            elif self._updating and not self._quitting:
+                message = MSG_UPDATING
+            else:
+                return True
+        log.info("window close blocked: %s", "flashing" if message == MSG_LOCKED else "updating")
         window = self._window
         if window is not None:
-            code = f"window.studio.onCloseBlocked({json.dumps(MSG_LOCKED)})"
+            code = f"window.studio.onCloseBlocked({json.dumps(message)})"
 
             def notify():
                 try:
@@ -570,6 +635,129 @@ class StudioApi:
         self._stop.set()
         log.info("stop requested")
         return {"ok": True}
+
+    # ---- app update -----------------------------------------------------------
+    def _run_update_check(self) -> None:
+        manifest = None
+        try:
+            manifest = self._updater_check(self._current_version)
+        except Exception:  # noqa: BLE001 - updater.check never raises; an injected one might. Never shown.
+            log.exception("update check failed")
+        with self._state:
+            self._update_manifest = manifest
+        self._update_checked.set()
+
+    def check_update(self) -> dict:
+        """Starts the update check once (background thread) and waits up to UPDATE_CHECK_WAIT_S for it.
+
+        Returns get_update_state(); "checking": True means it is still running (poll get_update_state()).
+        """
+        with self._state:
+            if self._update_thread is None:
+                self._update_thread = threading.Thread(target=self._run_update_check, name="update-check",
+                                                       daemon=True)
+                self._update_thread.start()
+        self._update_checked.wait(UPDATE_CHECK_WAIT_S)
+        return self.get_update_state()
+
+    def get_update_state(self) -> dict:
+        """{"ok", "available", "version", "current", "has_work", "checking", "flashing", "updating"}.
+
+        has_work: a GIF or music has been added (an update restart loses them). The UI asks again after a
+        flash ends to show a prompt it deferred.
+        """
+        with self._state:
+            manifest = self._update_manifest if not self._update_installed else None
+            return {"ok": True, "available": manifest is not None,
+                    "version": manifest.version if manifest is not None else "",
+                    "current": self._current_version,
+                    "has_work": self._gif is not None or bool(self._tracks),
+                    "checking": not self._update_checked.is_set(),
+                    "flashing": self._flashing, "updating": self._updating}
+
+    def _update_progress_sender(self) -> Callable[[float], None]:
+        """progress(fraction) for updater.download, throttled to >= 1 % or 200 ms steps (plus the last one)."""
+        last = {"fraction": None, "time": 0.0}
+
+        def progress(fraction: float) -> None:
+            window = self._window
+            if window is None:
+                return
+            now = self._clock()
+            prev = last["fraction"]
+            if prev is not None and fraction < 1.0 and abs(fraction - prev) < UPDATE_PROGRESS_STEP \
+                    and now - last["time"] < UPDATE_PROGRESS_INTERVAL_S:
+                return
+            last["fraction"], last["time"] = fraction, now
+            try:
+                window.evaluate_js(f"window.studio.onUpdateProgress({fraction:.3f})")
+            except Exception:  # noqa: BLE001 - a lost progress update must not abort the download
+                log.exception("could not send update progress")
+        return progress
+
+    def start_update(self) -> dict:
+        """Downloads, verifies and installs the newer version, then quits so it can start.
+
+        Refused while flashing. Failure: {"ok": False, "message": "更新失敗：<原因>，你可以繼續使用目前的版本"}
+        and the old version keeps running. Installed but not restarted: {"ok": False, "installed": True, ...}.
+        """
+        with self._state:
+            if self._flashing:
+                return _fail(MSG_UPDATE_WHILE_FLASHING)
+            if self._updating:
+                return _fail(MSG_UPDATING)
+            manifest = self._update_manifest if not self._update_installed else None
+            if manifest is None:
+                return _fail(MSG_NO_UPDATE)
+            self._updating = True
+        tmp = None
+        try:
+            exe = self._executable()
+            if exe is None:
+                raise updater.UpdateError(MSG_FROM_SOURCE, "not a packaged build (running from source)")
+            key = self._platform_key()
+            asset = manifest.assets.get(key)
+            if asset is None:
+                raise updater.UpdateError(updater.MSG_UNSUPPORTED, f"release {manifest.version} has no {key}")
+            tmp = pathlib.Path(tempfile.mkdtemp(prefix="pixelboard-update-"))
+            log.info("updating %s -> %s (%s)", self._current_version, manifest.version, key)
+            downloaded = self._updater_download(asset, tmp, self._update_progress_sender())
+            self._updater_install(downloaded, key, exe)
+        except updater.UpdateError as exc:
+            log.warning("update failed: %s", exc)
+            with self._state:
+                self._updating = False
+                if exc.user_message == updater.MSG_RESTART:  # new version is in place; it starts next time
+                    self._update_installed = True
+                    return {"ok": False, "installed": True, "message": exc.user_message}
+            return _fail(MSG_UPDATE_FAILED.format(reason=exc.user_message))
+        except Exception:  # noqa: BLE001 - logged with traceback; the user gets a generic reason
+            log.exception("update failed unexpectedly")
+            with self._state:
+                self._updating = False
+            return _fail(MSG_UPDATE_FAILED.format(reason=MSG_UNEXPECTED))
+        finally:
+            if tmp is not None:
+                try:
+                    shutil.rmtree(tmp)
+                except OSError as exc:  # leftovers in the temp folder only; the update result stands
+                    log.warning("could not remove the download folder %s: %s", tmp, exc)
+        log.info("update %s installed; quitting", manifest.version)
+        with self._state:
+            self._quitting = True
+        try:
+            self._quit()
+        except Exception:  # noqa: BLE001 - the new version is already running; let the user close this one
+            log.exception("could not close the window after the update")
+            with self._state:
+                self._updating = self._quitting = False
+            return {"ok": True, "message": "新版本已安裝，請關閉這個視窗"}
+        return {"ok": True, "message": "正在開啟新版本…"}
+
+    def _quit(self) -> None:
+        """Closes the window (ends webview.start() and the process) after a successful update."""
+        if self._window is not None:
+            self._window.destroy()
 
 
 def run() -> None:
