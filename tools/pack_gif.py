@@ -4,6 +4,7 @@ Used by menu.sh "Convert GIF"; the result (assets/gif.pxg) is flashed by `idf.py
 PixelBoard Studio does the same thing with a GUI.
 """
 import argparse
+import json
 import logging
 import pathlib
 import sys
@@ -15,25 +16,35 @@ from pixelboard import gifproc, layout, pxg  # noqa: E402
 log = logging.getLogger("pack_gif")
 
 
+def load_layout(path: str) -> layout.Arrangement:
+    """Strict load: unlike layout.load, a bad file is an error, never a silent fallback."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return layout.from_dict(json.load(f))
+    except (OSError, ValueError) as exc:
+        raise layout.LayoutError(f"無法讀取排列檔 {path}：{exc}") from exc
+
+
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", help="source .gif")
     parser.add_argument("output", help="output .pxg")
-    parser.add_argument("--chain", type=int, default=1, help="chained 64x32 panels (1 or 2)")
+    parser.add_argument("--layout", help="arrangement JSON (Studio's layout.json); overrides --chain")
+    parser.add_argument("--chain", type=int, default=1, help="panels in a row, 1..8 (ignored with --layout)")
     parser.add_argument("--split", action="store_true", help="one part of the GIF per panel")
     parser.add_argument("--brightness", type=int, default=90, help="panel brightness 10..128")
-    parser.add_argument("--swap", action="store_true", help="panels are cabled right-to-left")
     args = parser.parse_args(argv)
 
     try:
         src = gifproc.load(args.input)
-        if args.chain not in (1, 2):
-            raise gifproc.GifError(f"面板數只能是 1 或 2（目前是 {args.chain}）")
-        if args.split and args.chain != 2:
-            raise gifproc.GifError("「每塊面板一份」需要 2 塊串接的面板")
+        if args.layout:
+            arr = load_layout(args.layout)
+        else:
+            if not 1 <= args.chain <= layout.MAX_PANELS:
+                raise gifproc.GifError(f"面板數要在 1 到 {layout.MAX_PANELS} 之間（目前是 {args.chain}）")
+            arr = layout.preset("row", args.chain)
         placement = gifproc.Placement(mode="split" if args.split else "whole")
-        arr = layout.legacy_row(args.chain, args.swap)
         w, h = layout.bounds(arr)
         frames = [(layout.chain_frame(rgb, w, h, arr), ms) for rgb, ms in gifproc.render(src, placement, arr)]
         data = pxg.pack(frames, arr, args.brightness, args.split)
@@ -49,7 +60,7 @@ def main(argv=None) -> int:
     except OSError as exc:
         log.error("cannot write %s: %s", out, exc)
         return 1
-    log.info("wrote %s: %d frame(s), chain %d, %d bytes", out, len(frames), args.chain, len(data))
+    log.info("wrote %s: %d frame(s), chain %d, %d bytes", out, len(frames), arr.n, len(data))
     return 0
 
 

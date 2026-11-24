@@ -154,13 +154,6 @@ def preset(name: str, n: int) -> Arrangement:
     return _make(panels)
 
 
-def legacy_row(n: int, swap: bool = False) -> Arrangement:
-    """Row preset; with swap on 2 panels the data order is reversed (the old "swap" cabling flag)."""
-    if swap and n == 2:
-        return _make([Panel(0, PANEL_W, 0, 0), Panel(1, 0, 0, 0)])
-    return preset("row", n)
-
-
 def grid_shape(arr: Arrangement) -> Optional[tuple]:
     """(rows, cols, row-major panel index list) if panels form a full grid, else None."""
     panels = arr.panels

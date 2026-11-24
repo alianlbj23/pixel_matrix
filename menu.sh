@@ -157,8 +157,17 @@ read_board_value() {
 
 # Pick a GIF from assets/gif/ and write assets/gif.pxg (PXG1); Flash writes it to the gif partition.
 do_convert_gif() {
-    local gifs=() g chain split_arg=()
-    chain="$(read_board_value kPanelChain)" || return 1
+    local gifs=() g chain split_arg=() source_arg=()
+    if [[ -f assets/layout.json ]]; then
+        source_arg=(--layout assets/layout.json)
+        chain="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["panels"]))' assets/layout.json)" || {
+            echo "assets/layout.json is unreadable" >&2
+            return 1
+        }
+    else
+        chain="$(read_board_value kPanelChain)" || return 1
+        source_arg=(--chain "$chain")
+    fi
     for g in assets/gif/*.gif; do
         [[ -f "$g" ]] && gifs+=("$g")
     done
@@ -182,7 +191,7 @@ do_convert_gif() {
             esac
         done
     fi
-    run_step "Convert $g" python3 tools/pack_gif.py "$g" assets/gif.pxg --chain "$chain" "${split_arg[@]}"
+    run_step "Convert $g" python3 tools/pack_gif.py "$g" assets/gif.pxg "${source_arg[@]}" "${split_arg[@]}"
 }
 
 do_build_studio() { do_build && run_step "Build Studio exe" bash studio/build_exe.sh; }
