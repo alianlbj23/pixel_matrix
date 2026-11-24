@@ -36,8 +36,10 @@ on:
 permissions:
   contents: read
 
+# One queue per ref: a ci-test/** or dry-run push must not displace a pending main release
+# (GitHub keeps only the newest pending run in a group). Running jobs are never cancelled.
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -164,7 +166,8 @@ jobs:
           set -euo pipefail
           python studio/packaging/write_version.py "$VERSION" studio/pixelboard/_version.py
           # A release must carry a plain X.Y.N version (never a -dev build, which skips update checks).
-          grep -Eq '^APP_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$' studio/pixelboard/_version.py
+          # On Windows the file has CRLF line endings and MSYS grep keeps the \r, so strip it first.
+          tr -d '\r' < studio/pixelboard/_version.py | grep -Eq '^APP_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$'
           cat studio/pixelboard/_version.py
 
       # PyInstaller copies the shared libraries that Qt's plugins link against from the build machine
