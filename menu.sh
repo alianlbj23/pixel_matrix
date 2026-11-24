@@ -103,7 +103,21 @@ do_tests() {
     fi
     rm -f "$out"
     [[ $rc -eq 0 ]] || return $rc
-    run_step "Host unit tests (gif2c)" python3 -m unittest discover -s test/host -p 'test_*.py'
+    run_step "Host unit tests (gif2c)" python3 -m unittest discover -s test/host -p 'test_*.py' || return 1
+    ensure_studio_venv || return 1
+    run_step "Studio unit tests" "$STUDIO_PY" -m unittest discover -s studio/tests -t studio
+}
+
+# Test venv for studio/: system Python + Pillow, plus the pinned esptool/pyserial.
+readonly STUDIO_PY="$PROJECT_DIR/.venv-studio/bin/python"
+ensure_studio_venv() {
+    [[ -x "$STUDIO_PY" ]] && return 0
+    echo "==> Creating .venv-studio (first run only)"
+    python3 -m venv --system-site-packages "$PROJECT_DIR/.venv-studio" &&
+        "$STUDIO_PY" -m pip install -q esptool==5.6.0 pyserial==3.5 || {
+            echo "Cannot create .venv-studio" >&2
+            return 1
+        }
 }
 
 # Reads `constexpr ... <name> = <number>;` from main/board_config.h into the named variable.
