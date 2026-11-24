@@ -6,7 +6,7 @@ import serial
 from esptool.util import FatalError
 
 from pixelboard.board import AUDIO_OFFSET, GIF_OFFSET, BoardError, PortInfo, find_board_ports
-from pixelboard.flasher import Flasher, to_board_error
+from pixelboard.flasher import MSG_NO_PERMISSION, Flasher, to_board_error
 
 
 class FindBoardPortsTest(unittest.TestCase):
@@ -29,6 +29,16 @@ class ErrorMappingTest(unittest.TestCase):
         err = to_board_error(serial.SerialException(
             "could not open port 'COM11': PermissionError(13, 'Access is denied.', None, 5)"))
         self.assertIsInstance(err, BoardError)
+        self.assertIn("被其他程式占用", err.user_message)
+
+    def test_linux_permission_message(self):
+        err = to_board_error(serial.SerialException(
+            "[Errno 13] could not open port /dev/ttyACM0: [Errno 13] Permission denied: '/dev/ttyACM0'"))
+        self.assertEqual(err.user_message, MSG_NO_PERMISSION)
+
+    def test_windows_access_denied_still_busy(self):
+        err = to_board_error(serial.SerialException(
+            "could not open port 'COM11': PermissionError(13, 'Access is denied.', None, 5)"))
         self.assertIn("被其他程式占用", err.user_message)
 
     def test_connect_failed_mentions_boot(self):

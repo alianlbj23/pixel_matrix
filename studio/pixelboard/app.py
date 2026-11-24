@@ -15,11 +15,12 @@ import logging
 import math
 import os
 import pathlib
+import sys
 import threading
 import time
 from typing import Callable, Optional
 
-from . import firmware, gifproc, layout, pxa, pxg, serialcmd
+from . import firmware, gifproc, layout, paths, pxa, pxg, serialcmd
 from .board import MSG_NOTHING, BoardError, find_board_ports, list_system_ports, plan_flash, read_state
 from .flasher import Flasher, to_board_error
 
@@ -52,12 +53,13 @@ def _fail(message: str) -> dict:
     return {"ok": False, "message": message}
 
 
-def default_layout_path() -> pathlib.Path:
-    """%LOCALAPPDATA%\\PixelBoard-Studio\\layout.json on Windows, ~/.pixelboard-studio/layout.json elsewhere."""
-    base = os.environ.get("LOCALAPPDATA", "")
-    if os.name == "nt" and base.strip():
-        return pathlib.Path(base) / "PixelBoard-Studio" / "layout.json"
-    return pathlib.Path.home() / ".pixelboard-studio" / "layout.json"
+def gui_for(platform: str) -> str:
+    """pywebview GUI backend for a sys.platform value."""
+    if platform == "win32":
+        return "edgechromium"
+    if platform == "darwin":
+        return "cocoa"
+    return "qt"
 
 
 def _as_int(value, lo: int, hi: int) -> int:
@@ -136,7 +138,7 @@ class StudioApi:
         self._load_images = images_loader or firmware.load_images
         self._identify = identify_fn or serialcmd.identify
         self._clock = clock or time.monotonic
-        self._layout_path = pathlib.Path(layout_path) if layout_path is not None else default_layout_path()
+        self._layout_path = pathlib.Path(layout_path) if layout_path is not None else paths.layout_path()
         self._lock = threading.Lock()     # one board operation (prepare/confirm/cancel/identify) at a time
         self._state = threading.RLock()   # guards the editable state below and _flashing
         self._stop = threading.Event()    # set by stop_flash(), read by Flasher.write_chunked
@@ -594,4 +596,4 @@ def run() -> None:
 
     window.events.loaded += on_loaded
     window.events.closing += api.can_close  # returning False keeps the window open while flashing
-    webview.start(gui="edgechromium")
+    webview.start(gui=gui_for(sys.platform))

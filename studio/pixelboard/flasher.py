@@ -12,6 +12,7 @@ BAUD = 460800
 CONNECT_ATTEMPTS = 3
 
 MSG_PORT_BUSY = "板子被其他程式占用中（例如序列監看器），請關閉後再試"
+MSG_NO_PERMISSION = "沒有權限使用 USB 序列埠：請執行 sudo usermod -aG dialout $USER 後重新登入"
 MSG_CONNECT = "無法讓板子進入燒錄模式：請按住 BOOT 鍵、按一下 RESET、放開 BOOT 後再試"
 MSG_INTERRUPTED = "燒錄中斷，請確認 USB 線沒有鬆脫，重新插上後再按一次燒錄"
 MSG_UNEXPECTED = "發生未預期的錯誤："
@@ -29,6 +30,8 @@ def to_board_error(exc: Exception) -> BoardError:
         return exc
     text = str(exc)
     lowered = text.lower()
+    if ("permission denied" in lowered or "[errno 13]" in lowered) and "/dev/tty" in lowered:
+        return BoardError(MSG_NO_PERMISSION)
     if "could not open port" in lowered or "permissionerror" in lowered or "access is denied" in lowered:
         return BoardError(MSG_PORT_BUSY)
     if "failed to connect" in lowered or "no serial data received" in lowered:
