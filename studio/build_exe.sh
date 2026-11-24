@@ -39,7 +39,15 @@ if [[ ! -x "$VENV_PY" ]]; then
     "$PY310" -m venv "$(wslpath -w "$WORK/venv")"
 fi
 echo "==> Installing pinned requirements"
-"$VENV_PY" -m pip install --disable-pip-version-check -q -r "$(wslpath -w "$SRC/requirements.txt")"
+PIP_ARGS=(-r "$(wslpath -w "$SRC/requirements.txt")")
+if [[ -f "$REPO/studio/requirements-lock.txt" ]]; then
+    # Constrain transitive dependencies to the versions recorded by the last build.
+    cp "$REPO/studio/requirements-lock.txt" "$SRC/requirements-lock.txt"
+    PIP_ARGS+=(-c "$(wslpath -w "$SRC/requirements-lock.txt")")
+else
+    echo "    (no requirements-lock.txt yet: transitive versions are resolved fresh)"
+fi
+"$VENV_PY" -m pip install --disable-pip-version-check -q "${PIP_ARGS[@]}"
 "$VENV_PY" -m pip freeze --disable-pip-version-check | tr -d '\r' > "$REPO/studio/requirements-lock.txt"
 
 echo "==> Running PyInstaller"

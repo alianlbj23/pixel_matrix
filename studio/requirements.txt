@@ -1,5 +1,6 @@
 # PixelBoard Studio (Windows build). Direct dependencies, pinned (approved by the user 2026-11-24).
-# Resolved transitive versions are recorded in requirements-lock.txt by build_exe.sh.
+# Resolved transitive versions are recorded in requirements-lock.txt by build_exe.sh and used as
+# pip constraints (-c) on the next build.
 pywebview==6.2.1
 esptool==5.6.0
 pyserial==3.5

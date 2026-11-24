@@ -85,7 +85,7 @@ Python 測試也可以直接跑：`.venv-studio/bin/python -m unittest discover 
 
 ### 建 exe
 
-`menu.sh` 選 8，或在 build 完成後執行 `bash studio/build_exe.sh`。腳本會用 Windows 的 Python 3.10 建 venv（放在 `%LOCALAPPDATA%\pixelboard-studio-build`）、安裝 `studio/requirements.txt` 固定的套件，再用 PyInstaller 打包，韌體映像（bootloader、分割表、app）會一起包進 exe。輸出 `dist/PixelBoard-Studio.exe`（`dist/` 不進版本控制），結尾會印出 Windows 路徑。如果舊的 exe 還在執行，最後複製會失敗，請先關閉它。
+`menu.sh` 選 8，或在 build 完成後執行 `bash studio/build_exe.sh`。腳本會用 Windows 的 Python 3.10 建 venv（放在 `%LOCALAPPDATA%\pixelboard-studio-build`）、安裝 `studio/requirements.txt` 固定的套件（間接相依套件的版本由 `studio/requirements-lock.txt` 固定），再用 PyInstaller 打包，韌體映像（bootloader、分割表、app）會一起包進 exe。輸出 `dist/PixelBoard-Studio.exe`（`dist/` 不進版本控制），結尾會印出 Windows 路徑。如果舊的 exe 還在執行，最後複製會失敗，請先關閉它。
 
 ### 開發者用的排列檔 assets/layout.json
 
