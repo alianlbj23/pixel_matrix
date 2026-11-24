@@ -403,7 +403,10 @@ class StudioApi:
         return ports[0]
 
     def identify(self, port: Optional[str]) -> dict:
-        """Shows each panel's number and "up" arrow on the real panels for 5 s (no flashing)."""
+        """Shows each panel's number and "up" arrow on the real panels for 5 s (no flashing).
+
+        When the board does not take commands (old firmware) the failure carries "needs_firmware": True.
+        """
         with self._state:
             locked = self._locked()
             if locked:
@@ -417,6 +420,8 @@ class StudioApi:
             message = self._identify(self._resolve_port(port), n)
             self._identify_until = self._clock() + IDENTIFY_HOLD_S
             return {"ok": True, "message": message}
+        except serialcmd.NeedsFirmwareError as exc:
+            return {"ok": False, "needs_firmware": True, "message": exc.user_message}
         except BoardError as exc:
             return _fail(exc.user_message)
         except Exception as exc:  # noqa: BLE001

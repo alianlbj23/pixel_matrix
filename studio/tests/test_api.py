@@ -8,7 +8,7 @@ import unittest
 
 from PIL import Image
 
-from pixelboard import layout, pxa, pxg
+from pixelboard import layout, pxa, pxg, serialcmd
 from pixelboard.app import MSG_LOCKED, MSG_STOPPED, StudioApi
 from pixelboard.board import AUDIO_OFFSET, BOARD_PID, BOARD_VID, GIF_OFFSET, BoardError, PortInfo
 from pixelboard.flasher import MSG_PORT_BUSY, Flasher
@@ -406,11 +406,17 @@ class IdentifyApiTest(ApiTestCase):
         self.assertEqual(len(self.identify_calls), 2)
 
     def test_identify_failure_message(self):
-        self.identify_error = BoardError("這塊板子還沒有新版韌體，請先按『安裝/更新韌體』")
+        self.identify_error = BoardError("板子回報錯誤：panel init failed")
         res = self.api.identify("COM11")
-        self.assertEqual(res, {"ok": False, "message": "這塊板子還沒有新版韌體，請先按『安裝/更新韌體』"})
+        self.assertEqual(res, {"ok": False, "message": "板子回報錯誤：panel init failed"})
         self.identify_error = None
         self.assertTrue(self.api.identify("COM11")["ok"])  # a failure does not start the 5 s wait
+
+    def test_identify_needs_firmware_flag(self):
+        self.identify_error = serialcmd.NeedsFirmwareError()
+        res = self.api.identify("COM11")
+        self.assertEqual(res, {"ok": False, "needs_firmware": True,
+                               "message": "這塊板子還沒有新版韌體，請先按『安裝/更新韌體』"})
 
     def test_identify_bad_port(self):
         res = self.api.identify(5)

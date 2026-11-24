@@ -388,7 +388,7 @@ async function identifyPanels() {
       setStatus(res.message, "ok");
     } else {
       setStatus(res.message, "error");
-      if (typeof res.message === "string" && res.message.includes("安裝/更新韌體")) pointAt($("install-fw"));
+      if (res.needs_firmware === true) pointAt($("install-fw"));
     }
   } catch (err) {
     reportError("identify", err);

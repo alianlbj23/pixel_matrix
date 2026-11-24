@@ -34,7 +34,7 @@ def to_board_error(exc: Exception) -> BoardError:
     if "failed to connect" in lowered or "no serial data received" in lowered:
         return BoardError(MSG_CONNECT)
     if "write failed" in lowered or "device disconnected" in lowered or "read failed" in lowered \
-            or "timed out waiting" in lowered:
+            or "timed out waiting" in lowered or "write timeout" in lowered:
         return BoardError(MSG_INTERRUPTED)
     return BoardError(f"{MSG_UNEXPECTED}{text}")
 

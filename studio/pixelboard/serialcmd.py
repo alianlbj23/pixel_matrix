@@ -26,6 +26,13 @@ MSG_NO_REPLY = "這塊板子還沒有新版韌體，請先按『安裝/更新韌
 MSG_FIRMWARE_ERROR = "板子回報錯誤："
 
 
+class NeedsFirmwareError(BoardError):
+    """The board does not take commands (no reply, or it never reads the port): old firmware."""
+
+    def __init__(self):
+        super().__init__(MSG_NO_REPLY)
+
+
 def _check_count(n) -> None:
     if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= layout.MAX_PANELS:
         raise ValueError(f"panel count must be an int 1..{layout.MAX_PANELS}, got {n!r}")
@@ -67,14 +74,15 @@ def _read_reply(ser, n: int, timeout: float) -> str:
             raise BoardError(f"{MSG_FIRMWARE_ERROR}{reason}")
         log.info("ignoring unrelated reply %r", line)
     log.warning("no identify reply within %.1f s", timeout)
-    raise BoardError(MSG_NO_REPLY)
+    raise NeedsFirmwareError()
 
 
 def identify(port: str, n: int, open_serial: Callable = serial.Serial, timeout: float = 1.5) -> str:
     """Asks the firmware to show each panel's number and "up" arrow; returns a message for the user.
 
-    Raises BoardError (plain-language message) when the port cannot be used, the firmware does
-    not answer within `timeout` seconds, or it answers with an error. ValueError for a bad n.
+    Raises NeedsFirmwareError when the firmware does not answer within `timeout` seconds or does
+    not take the command at all (write timeout), BoardError (plain-language message) when the port
+    cannot be used or the firmware answers with an error. ValueError for a bad n.
     """
     _check_count(n)
     ser = None
@@ -85,6 +93,10 @@ def identify(port: str, n: int, open_serial: Callable = serial.Serial, timeout: 
         _read_reply(ser, n, timeout)
     except BoardError:
         raise
+    except serial.SerialTimeoutException as exc:
+        # Firmware without the command task never reads the USB port, so the write blocks.
+        log.warning("identify on %s: %s (firmware does not read commands)", port, exc)
+        raise NeedsFirmwareError() from exc
     except Exception as exc:  # noqa: BLE001 - pyserial errors become plain-language BoardErrors
         log.exception("identify on %s failed", port)
         raise to_board_error(exc) from exc

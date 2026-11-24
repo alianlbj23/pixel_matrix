@@ -39,6 +39,10 @@ class ErrorMappingTest(unittest.TestCase):
         err = to_board_error(serial.SerialException("write failed: device disconnected"))
         self.assertIn("燒錄中斷", err.user_message)
 
+    def test_write_timeout_interrupted(self):
+        err = to_board_error(serial.SerialTimeoutException("Write timeout"))
+        self.assertIn("燒錄中斷", err.user_message)
+
     def test_unexpected_keeps_original_text(self):
         err = to_board_error(ValueError("weird thing"))
         self.assertIn("未預期的錯誤", err.user_message)

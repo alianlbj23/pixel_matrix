@@ -10,7 +10,7 @@ from pixelboard.board import BoardError
 class FakeSerial:
     """Records how the port was opened; readline() hands out the queued chunks, then times out."""
 
-    def __init__(self, chunks=(), open_error=None):
+    def __init__(self, chunks=(), open_error=None, write_error=None):
         self.port = None
         self.dtr = None
         self.rts = None
@@ -21,6 +21,7 @@ class FakeSerial:
         self.closed = False
         self._chunks = list(chunks)
         self._open_error = open_error
+        self._write_error = write_error
 
     def open(self):
         if self._open_error:
@@ -31,6 +32,8 @@ class FakeSerial:
         pass
 
     def write(self, data):
+        if self._write_error:
+            raise self._write_error
         self.written += data
         return len(data)
 
@@ -59,6 +62,19 @@ class IdentifyTest(unittest.TestCase):
     def test_identify_no_reply(self):
         fake = FakeSerial([b"I (1) boot: something\r\n"])
         with self.assertRaises(BoardError) as ctx:
+            serialcmd.identify("COM11", 2, open_serial=opener(fake), timeout=0.05)
+        self.assertIn("安裝/更新韌體", ctx.exception.user_message)
+        self.assertTrue(fake.closed)
+
+    def test_identify_no_reply_needs_firmware(self):
+        with self.assertRaises(serialcmd.NeedsFirmwareError):
+            serialcmd.identify("COM11", 2, open_serial=opener(FakeSerial()), timeout=0.05)
+
+    def test_identify_write_timeout_needs_firmware(self):
+        # Old firmware never reads the USB port, so the host's write blocks until write_timeout.
+        fake = FakeSerial(write_error=serial.SerialTimeoutException("Write timeout"))
+        with self.assertRaises(serialcmd.NeedsFirmwareError) as ctx, \
+                self.assertLogs("pixelboard.serialcmd", "WARNING"):
             serialcmd.identify("COM11", 2, open_serial=opener(fake), timeout=0.05)
         self.assertIn("安裝/更新韌體", ctx.exception.user_message)
         self.assertTrue(fake.closed)
