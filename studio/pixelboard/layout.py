@@ -8,7 +8,9 @@ buffer is 64*N x 32 with panel i occupying x = 64*i .. 64*i+63.
 import json
 import logging
 import math
+import os
 import pathlib
+import tempfile
 from typing import NamedTuple, Optional
 
 log = logging.getLogger(__name__)
@@ -276,16 +278,35 @@ def load(path) -> Arrangement:
         log.warning("layout file %s not found, using default", path)
     except (OSError, ValueError, LayoutError) as e:
         log.warning("layout file %s unusable (%s), using default", path, e)
+    except RecursionError:  # absurdly deep nesting in a hand-edited or corrupt file
+        log.warning("layout file %s nested too deeply, using default", path)
     return preset("row", 1)
 
 
 def save(path, arr: Arrangement) -> None:
+    """Writes the arrangement atomically: a temp file in the same directory, then os.replace().
+
+    A failed write (disk full, killed mid-way) leaves the previous file intact. OSError is
+    logged and re-raised.
+    """
     validate(arr)
     path = pathlib.Path(path)
+    tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(to_dict(arr), f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = None
     except OSError:
         log.exception("could not save layout to %s", path)
         raise
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError as exc:
+                log.warning("could not remove temp file %s: %s", tmp, exc)

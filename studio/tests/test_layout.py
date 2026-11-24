@@ -3,6 +3,7 @@ import os
 import random
 import tempfile
 import unittest
+from unittest import mock
 
 from pixelboard import layout
 from pixelboard.layout import Arrangement, LayoutError, Panel
@@ -123,6 +124,14 @@ class LayoutTest(unittest.TestCase):
                 with self.assertLogs("pixelboard.layout", level="WARNING"):
                     self.assertEqual(layout.load(path).n, 1)
 
+    def test_load_deeply_nested_falls_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "layout.json")
+            with open(path, "w") as f:
+                f.write("[" * 200000 + "]" * 200000)
+            with self.assertLogs("pixelboard.layout", level="WARNING"):
+                self.assertEqual(layout.load(path).n, 1)
+
     def test_from_dict_rejects_bad_types(self):
         for d in (
             [], {"panels": "x"},
@@ -140,6 +149,31 @@ class LayoutTest(unittest.TestCase):
             path = os.path.join(d, "sub", "layout.json")
             layout.save(path, a)
             self.assertEqual(layout.load(path), a)
+
+    def test_save_replaces_atomically(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "layout.json")
+            with mock.patch("pixelboard.layout.os.replace", wraps=os.replace) as replace:
+                layout.save(path, layout.preset("row", 2))
+            replace.assert_called_once()
+            src, dst = replace.call_args[0]
+            self.assertEqual(os.path.dirname(os.fspath(src)), d)   # temp file in the same directory
+            self.assertEqual(os.fspath(dst), path)
+            self.assertEqual(os.listdir(d), ["layout.json"])
+
+    def test_failed_save_keeps_old_file(self):
+        old = layout.preset("row", 3)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "layout.json")
+            layout.save(path, old)
+            for target, error in (("pixelboard.layout.os.replace", OSError(28, "No space left on device")),
+                                  ("pixelboard.layout.json.dump", OSError(28, "No space left on device"))):
+                with self.subTest(target=target):
+                    with mock.patch(target, side_effect=error), \
+                            self.assertLogs("pixelboard.layout", level="ERROR"), self.assertRaises(OSError):
+                        layout.save(path, layout.preset("column", 2))
+                    self.assertEqual(layout.load(path), old)
+                    self.assertEqual(os.listdir(d), ["layout.json"])   # temp file removed
 
 
 if __name__ == "__main__":
