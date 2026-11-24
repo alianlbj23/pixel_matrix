@@ -1,0 +1,7 @@
+# PixelBoard Studio, Linux only: pywebview's Qt backend (QtWebEngine). Install with requirements.txt.
+# Pinned to releases uploaded to PyPI on/before 2026-11-11 (>= 2 weeks old when chosen on 2026-11-25):
+# PySide6 6.12.0 uploaded 2026-10-08 (abi3 wheels for CPython >= 3.10, manylinux_2_34 x86_64; it pins its
+# own PySide6_Essentials/_Addons/_WebEngine/_Pdf and shiboken6 of the same release),
+# QtPy 2.4.3 uploaded 2025-02-11.
+PySide6==6.12.0
+qtpy==2.4.3

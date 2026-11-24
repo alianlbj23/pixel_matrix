@@ -1,4 +1,7 @@
-"""Entry point of PixelBoard-Studio.exe."""
+"""Entry point of PixelBoard Studio (Windows exe, macOS app, Linux AppImage).
+
+``--version`` prints the app version and exits without opening a window or a log.
+"""
 import logging
 import os
 import pathlib
@@ -6,6 +9,7 @@ import subprocess
 import sys
 
 from pixelboard import paths
+from pixelboard.version import current_version
 
 WEBVIEW2_MISSING = ("這台電腦缺少 Microsoft Edge WebView2，請到 "
                     "https://go.microsoft.com/fwlink/p/?LinkId=2124703 安裝後再開啟")
@@ -67,11 +71,15 @@ def _cleanup_old_update() -> None:
         log.exception("cleaning up the previous version failed")
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--version"]:
+        print(current_version())
+        return 0
     logging.basicConfig(filename=_log_path(), level=logging.INFO, encoding="utf-8",
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     log = logging.getLogger("studio")
-    log.info("starting PixelBoard Studio")
+    log.info("starting PixelBoard Studio %s", current_version())
     _cleanup_old_update()
     try:
         from pixelboard.app import run

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PixelBoard Studio
+Comment=Make GIFs and music for the pixel board and flash it over USB
+Exec=PixelBoard-Studio
+Icon=pixelboard-studio
+Categories=Utility;
+Terminal=false

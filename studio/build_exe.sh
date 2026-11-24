@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Builds dist/PixelBoard-Studio.exe from WSL using the Windows python.org Python 3.10.
 # Needs a finished `idf.py build` (firmware images are bundled into the exe).
+# The exe is a local dev build: its version is "<studio/VERSION>.0-dev", which never checks for updates
+# (release builds get "<VERSION>.<run number>" from CI).
 set -euo pipefail
 
 readonly REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,6 +11,10 @@ readonly FW_FILES=(bootloader/bootloader.bin partition_table/partition-table.bin
 die() { echo "build_exe: $*" >&2; exit 1; }
 
 command -v cmd.exe >/dev/null || die "cmd.exe not found: this script must run in WSL"
+command -v python3 >/dev/null || die "python3 not found (needed to write the version file)"
+SERIES="$(tr -d '[:space:]' < "$REPO/studio/VERSION")"
+[[ "$SERIES" =~ ^[0-9]+\.[0-9]+$ ]] || die "invalid studio/VERSION: '$SERIES'"
+readonly APP_VERSION="$SERIES.0-dev"
 WIN_LOCALAPPDATA="$(cmd.exe /c "echo %LOCALAPPDATA%" 2>/dev/null | tr -d '\r')"
 [[ "$WIN_LOCALAPPDATA" == [A-Za-z]:\\* ]] || die "cannot read %LOCALAPPDATA% (got '$WIN_LOCALAPPDATA')"
 readonly WORK="$(wslpath "$WIN_LOCALAPPDATA")/pixelboard-studio-build"
@@ -27,11 +33,14 @@ for old in "$WORK"/src "$WORK"/src-*; do
     rm -rf "$old" 2>/dev/null || echo "    (skipped $(basename "$old"): still in use)"
 done
 echo "==> Staging sources in $SRC"
-mkdir -p "$SRC/firmware/bootloader" "$SRC/firmware/partition_table"
+mkdir -p "$SRC/firmware/bootloader" "$SRC/firmware/partition_table" "$SRC/packaging"
 cp -r "$REPO/studio/pixelboard" "$REPO/studio/run_studio.py" "$REPO/studio/PixelBoard-Studio.spec" \
       "$REPO/studio/requirements.txt" "$SRC/"
+cp "$REPO/studio/packaging/icon.png" "$SRC/packaging/"
 for f in "${FW_FILES[@]}"; do cp "$REPO/build/$f" "$SRC/firmware/$f"; done
 find "$SRC" -name '__pycache__' -prune -exec rm -rf {} +
+echo "==> Version $APP_VERSION"
+python3 "$REPO/studio/packaging/write_version.py" "$APP_VERSION" "$SRC/pixelboard/_version.py"
 
 readonly VENV_PY="$WORK/venv/Scripts/python.exe"
 if [[ ! -x "$VENV_PY" ]]; then
@@ -57,5 +66,5 @@ echo "==> Running PyInstaller"
 mkdir -p "$REPO/dist"
 cp "$SRC/dist/PixelBoard-Studio.exe" "$REPO/dist/PixelBoard-Studio.exe" ||
     die "cannot replace dist/PixelBoard-Studio.exe (close PixelBoard Studio first)"
-echo "==> Built $REPO/dist/PixelBoard-Studio.exe ($(du -h "$REPO/dist/PixelBoard-Studio.exe" | cut -f1))"
+echo "==> Built $REPO/dist/PixelBoard-Studio.exe $APP_VERSION ($(du -h "$REPO/dist/PixelBoard-Studio.exe" | cut -f1))"
 echo "    Windows path: $(wslpath -w "$REPO/dist/PixelBoard-Studio.exe")"

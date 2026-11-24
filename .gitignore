@@ -21,3 +21,5 @@ dist/
 studio/build/
 .venv-studio/
 studio/pixelboard/_version.py
+# Firmware images copied in for packaging (CI / local Linux trial)
+studio/firmware/

@@ -1,0 +1,7 @@
+# PixelBoard Studio, macOS only: pywebview's Cocoa/WebKit backend. Install with requirements.txt.
+# Pinned to releases uploaded to PyPI on/before 2026-11-11 (>= 2 weeks old when chosen on 2026-11-25):
+# pyobjc 13.0 was uploaded 2026-10-30 (wheels for CPython 3.11-3.15, universal2). pywebview also pulls
+# pyobjc-framework-Quartz/-Security/-UniformTypeIdentifiers; pip resolves them to the matching 13.x.
+pyobjc-core==13.0
+pyobjc-framework-Cocoa==13.0
+pyobjc-framework-WebKit==13.0
