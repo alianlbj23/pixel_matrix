@@ -19,13 +19,19 @@ for f in "${FW_FILES[@]}"; do
     [[ -f "$REPO/build/$f" ]] || die "missing build/$f: run Build first"
 done
 
-echo "==> Staging sources in $WORK/src"
-rm -rf "$WORK/src"
-mkdir -p "$WORK/src/firmware/bootloader" "$WORK/src/firmware/partition_table"
+# A fresh staging dir per build: an exe still running from an older build keeps its files
+# locked on Windows, so old dirs are removed best-effort only.
+readonly SRC="$WORK/src-$(date +%Y%m%d-%H%M%S)"
+for old in "$WORK"/src "$WORK"/src-*; do
+    [[ -d "$old" ]] || continue
+    rm -rf "$old" 2>/dev/null || echo "    (skipped $(basename "$old"): still in use)"
+done
+echo "==> Staging sources in $SRC"
+mkdir -p "$SRC/firmware/bootloader" "$SRC/firmware/partition_table"
 cp -r "$REPO/studio/pixelboard" "$REPO/studio/run_studio.py" "$REPO/studio/PixelBoard-Studio.spec" \
-      "$REPO/studio/requirements.txt" "$WORK/src/"
-for f in "${FW_FILES[@]}"; do cp "$REPO/build/$f" "$WORK/src/firmware/$f"; done
-find "$WORK/src" -name '__pycache__' -prune -exec rm -rf {} +
+      "$REPO/studio/requirements.txt" "$SRC/"
+for f in "${FW_FILES[@]}"; do cp "$REPO/build/$f" "$SRC/firmware/$f"; done
+find "$SRC" -name '__pycache__' -prune -exec rm -rf {} +
 
 readonly VENV_PY="$WORK/venv/Scripts/python.exe"
 if [[ ! -x "$VENV_PY" ]]; then
@@ -33,13 +39,15 @@ if [[ ! -x "$VENV_PY" ]]; then
     "$PY310" -m venv "$(wslpath -w "$WORK/venv")"
 fi
 echo "==> Installing pinned requirements"
-"$VENV_PY" -m pip install --disable-pip-version-check -q -r "$(wslpath -w "$WORK/src/requirements.txt")"
+"$VENV_PY" -m pip install --disable-pip-version-check -q -r "$(wslpath -w "$SRC/requirements.txt")"
 "$VENV_PY" -m pip freeze --disable-pip-version-check | tr -d '\r' > "$REPO/studio/requirements-lock.txt"
 
 echo "==> Running PyInstaller"
-(cd "$WORK/src" && "$VENV_PY" -m PyInstaller --noconfirm --log-level WARN \
+(cd "$SRC" && "$VENV_PY" -m PyInstaller --noconfirm --log-level WARN \
     --distpath dist --workpath work PixelBoard-Studio.spec)
 
 mkdir -p "$REPO/dist"
-cp "$WORK/src/dist/PixelBoard-Studio.exe" "$REPO/dist/PixelBoard-Studio.exe"
+cp "$SRC/dist/PixelBoard-Studio.exe" "$REPO/dist/PixelBoard-Studio.exe" ||
+    die "cannot replace dist/PixelBoard-Studio.exe (close PixelBoard Studio first)"
 echo "==> Built $REPO/dist/PixelBoard-Studio.exe ($(du -h "$REPO/dist/PixelBoard-Studio.exe" | cut -f1))"
+echo "    Windows path: $(wslpath -w "$REPO/dist/PixelBoard-Studio.exe")"
