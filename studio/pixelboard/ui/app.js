@@ -10,6 +10,8 @@ const layout = { chain: 1, split: false, offset_x: 0, offset_y: 0, scale: 1.0, b
 const preview = { frames: [], width: 64, height: 32, index: 0, playing: true, timer: null, lut: null };
 let hasGif = false;
 let busy = false;
+let auditionIndex = -1;   // track being auditioned, -1 when stopped
+let musicState = null;
 
 const KIND_TEXT = {
   first_install: "首次安裝：會寫入完整韌體、GIF 和音樂",
@@ -246,6 +248,8 @@ async function openGif(path) {
 
 function renderMusic(state) {
   if (!state.ok) { setStatus(state.message, "error"); return; }
+  if (musicState && state !== musicState) stopAudition(false);  // list changed: indexes moved
+  musicState = state;
   const list = $("tracks");
   list.replaceChildren();
   state.tracks.forEach((t, i) => {
@@ -262,7 +266,7 @@ function renderMusic(state) {
       return b;
     };
     li.append(name, meta,
-      btn("▶", "試聽", () => audition(i)),
+      btn(auditionIndex === i ? "⏹" : "▶", auditionIndex === i ? "停止" : "試聽", () => audition(i)),
       btn("↑", "往上移", async () => i > 0 && renderMusic(await api().move_track(i, i - 1))),
       btn("↓", "往下移", async () => i < state.tracks.length - 1 && renderMusic(await api().move_track(i, i + 1))),
       btn("✕", "移除", async () => renderMusic(await api().remove_track(i))));
@@ -282,12 +286,27 @@ function renderMusic(state) {
   }));
 }
 
+function stopAudition(redraw = true) {
+  const player = $("audition");
+  player.pause();
+  player.removeAttribute("src");
+  auditionIndex = -1;
+  if (redraw && musicState) renderMusic(musicState);
+}
+
 async function audition(index) {
+  if (auditionIndex === index) { stopAudition(); return; }   // second click on the same track = stop
   const player = $("audition");
   const res = await api().track_data_url(index);
   if (!res.ok) { setStatus(res.message, "error"); return; }
   player.src = res.url;
-  player.play().catch((err) => setStatus(`無法試聽：${err.message}`, "error"));
+  auditionIndex = index;
+  renderMusic(musicState);
+  player.onended = () => stopAudition();
+  player.play().catch((err) => {
+    stopAudition();
+    setStatus(`無法試聽：${err.message}`, "error");
+  });
 }
 
 async function handleFiles(paths) {
