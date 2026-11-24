@@ -52,7 +52,7 @@ class PxaTest(unittest.TestCase):
         self.assertIn("容量", cm.exception.user_message)
 
     def test_capacity_constant(self):
-        self.assertEqual(pxa.CAPACITY, 12 * 1024 * 1024)
+        self.assertEqual(pxa.CAPACITY, 10 * 1024 * 1024)
 
     def test_too_many_files(self):
         with self.assertRaises(PxaError):

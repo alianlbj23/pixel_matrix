@@ -159,7 +159,7 @@ class FlashApiTest(ApiTestCase):
         anim = pxg.unpack(written[0x210000])
         self.assertEqual([rgb for rgb, _ in anim.frames], [base64.b64decode(f["rgb_b64"]) for f in prev["frames"]])
         self.assertEqual((anim.chain, anim.brightness, anim.swap, anim.split), (2, 90, False, True))
-        self.assertNotIn(0x310000, written)  # no music added -> keep the board's music
+        self.assertNotIn(0x510000, written)  # no music added -> keep the board's music
         self.assertTrue(flasher.reset and flasher.closed)
 
     def test_music_written_when_added(self):
@@ -168,7 +168,7 @@ class FlashApiTest(ApiTestCase):
         self.api.prepare_flash(LAYOUT, "COM11")
         self.api.confirm_flash()
         written = dict(FakeFlasher.instances[-1].writes)
-        self.assertEqual([t.name for t in pxa.unpack(written[0x310000])], ["a.mp3"])
+        self.assertEqual([t.name for t in pxa.unpack(written[0x510000])], ["a.mp3"])
 
     def test_flash_without_board_message(self):
         api = StudioApi(list_ports=lambda: [], flasher_factory=FakeFlasher, images_loader=lambda: IMAGES)

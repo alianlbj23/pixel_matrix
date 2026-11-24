@@ -17,7 +17,7 @@ def make_build(root: pathlib.Path, flash_files: dict) -> None:
 
 
 GOOD = {"0x0": "bootloader/bootloader.bin", "0x8000": "partition_table/partition-table.bin",
-        "0x10000": "pixel-board.bin", "0x310000": "audio.bin"}
+        "0x10000": "pixel-board.bin", "0x510000": "audio.bin"}
 
 
 class LoadImagesTest(unittest.TestCase):

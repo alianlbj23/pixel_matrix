@@ -132,7 +132,7 @@ class StudioApi:
                 info = pxa.validate_track(path.name, data)
                 sizes = [len(t["data"]) for t in self._tracks] + [len(data)]
                 if pxa.packed_size(sizes) > pxa.CAPACITY:
-                    raise pxa.PxaError("加入這首會超過音樂容量（12MB），請先移除其他音樂")
+                    raise pxa.PxaError(f"加入這首會超過音樂容量（{pxa.CAPACITY // 1048576}MB），請先移除其他音樂")
                 if len(self._tracks) >= pxa.MAX_FILES:
                     raise pxa.PxaError(f"最多只能放 {pxa.MAX_FILES} 首")
             except pxa.PxaError as exc:

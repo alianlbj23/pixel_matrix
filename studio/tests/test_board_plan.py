@@ -32,7 +32,7 @@ class PlanFlashTest(unittest.TestCase):
     def test_factory_demo_is_first_install(self):
         plan = self.plan(AppInfo("factory_demo", "v2"))
         self.assertEqual(plan.kind, "first_install")
-        self.assertEqual(offsets(plan), [0x0, 0x8000, 0x10000, 0x210000, 0x310000])
+        self.assertEqual(offsets(plan), [0x0, 0x8000, 0x10000, 0x210000, 0x510000])
 
     def test_erased_flash_is_first_install(self):
         plan = self.plan(parse_app_desc(b"\xff" * 256), table=b"\xff" * 0xC00)
@@ -46,12 +46,12 @@ class PlanFlashTest(unittest.TestCase):
     def test_other_version_updates_firmware_without_bootloader(self):
         plan = self.plan(AppInfo("pixel-board", "0.9.0"))
         self.assertEqual(plan.kind, "update_firmware")
-        self.assertEqual(offsets(plan), [0x10000, 0x210000, 0x310000])
+        self.assertEqual(offsets(plan), [0x10000, 0x210000, 0x510000])
 
     def test_old_partition_table_is_rewritten(self):
         plan = self.plan(BUNDLED_APP, table=OLD_PART)
         self.assertEqual(plan.kind, "update_firmware")
-        self.assertEqual(offsets(plan), [0x8000, 0x10000, 0x210000, 0x310000])
+        self.assertEqual(offsets(plan), [0x8000, 0x10000, 0x210000, 0x510000])
 
     def test_keep_music_note_when_audio_none(self):
         plan = self.plan(BUNDLED_APP, audio=None)

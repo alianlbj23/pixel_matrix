@@ -5,7 +5,7 @@ idf_component_register(SRCS "main.cpp" "font5x7.cpp" "tone.cpp" "audio.cpp"
                                 esp_audio_codec esp_partition)
 
 # Developer music: pack assets/audio/*.mp3 into a PXA1 image (tools/pack_audio.py, stdlib only) and
-# write it to the "audio" partition on `idf.py flash`. The build fails on invalid MP3s or > 12 MB.
+# write it to the "audio" partition on `idf.py flash`. The build fails on invalid MP3s or > 10 MB.
 idf_build_get_property(python PYTHON)
 set(AUDIO_PXA "${CMAKE_BINARY_DIR}/audio.pxa")
 file(GLOB AUDIO_FILES CONFIGURE_DEPENDS "${PROJECT_DIR}/assets/audio/*")
