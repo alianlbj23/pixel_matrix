@@ -2,6 +2,7 @@
 
 Every public StudioApi method returns a JSON-serialisable dict and never raises to JS:
 failures come back as {"ok": False, "message": <plain-language Chinese text>}.
+(can_close() is the exception: it is the window's closing handler and returns a bool.)
 Flashing is two steps so the user can confirm what will be written:
 prepare_flash() connects and plans, then confirm_flash() writes (or cancel_flash()).
 From prepare_flash() until confirm/cancel finishes every editing method is locked
@@ -528,6 +529,30 @@ class StudioApi:
             self._end_flashing()
         return {"ok": True}
 
+    def can_close(self) -> bool:
+        """Window close requested (pywebview `closing` handler): False cancels it while flashing.
+
+        Runs on the GUI thread, so the UI message is sent from a helper thread: evaluate_js
+        waits for the GUI thread and would deadlock here.
+        """
+        with self._state:
+            flashing = self._flashing
+        if not flashing:
+            return True
+        log.info("window close blocked: flashing in progress")
+        window = self._window
+        if window is not None:
+            code = f"window.studio.onCloseBlocked({json.dumps(MSG_LOCKED)})"
+
+            def notify():
+                try:
+                    window.evaluate_js(code)
+                except Exception:  # noqa: BLE001 - nothing else can show it; the close is still cancelled
+                    log.exception("could not show the close-blocked message")
+
+            threading.Thread(target=notify, name="close-blocked", daemon=True).start()
+        return False
+
     def stop_flash(self) -> dict:
         """Asks a running confirm_flash() to stop at the next 64 KiB step of the gif/audio data.
 
@@ -561,4 +586,5 @@ def run() -> None:
         doc.events.drop += DOMEventHandler(on_drop, prevent_default=True, stop_propagation=True)
 
     window.events.loaded += on_loaded
+    window.events.closing += api.can_close  # returning False keeps the window open while flashing
     webview.start(gui="edgechromium")

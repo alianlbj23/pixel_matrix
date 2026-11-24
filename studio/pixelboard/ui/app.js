@@ -69,6 +69,9 @@ window.studio = {
     setStatus(`${label} ${Math.round(f * 100)}%`);
     syncStop();
   },
+  onCloseBlocked(message) {
+    setStatus(typeof message === "string" && message ? message : "燒錄中，請先停止燒錄", "error");
+  },
   onFilesDropped(paths) {
     if (isFlashing()) { setStatus("燒錄中，請先停止燒錄", "error"); return; }
     if (!Array.isArray(paths)) return;

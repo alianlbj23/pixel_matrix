@@ -3,6 +3,7 @@ import hashlib
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 
 from PIL import Image
@@ -104,11 +105,20 @@ class FakeClock:
 
 
 class FakeWindow:
-    def __init__(self):
+    def __init__(self, error=None):
         self.js = []
+        self.error = error
 
     def evaluate_js(self, code):
         self.js.append(code)
+        if self.error:
+            raise self.error
+
+    def wait_js(self, count=1, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while len(self.js) < count and time.monotonic() < deadline:
+            time.sleep(0.005)
+        return self.js
 
 
 class ApiTestCase(unittest.TestCase):
@@ -593,6 +603,36 @@ class FlashApiTest(ApiTestCase):
         FakeFlasher.on_piece = None
         self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])  # a new flash starts un-stopped
         self.assertTrue(self.api.confirm_flash()["ok"])
+
+    def test_can_close_when_idle(self):
+        window = FakeWindow()
+        self.api._window = window
+        self.assertTrue(self.api.can_close())
+        time.sleep(0.05)
+        self.assertEqual(window.js, [])
+
+    def test_close_blocked_while_flashing(self):
+        window = FakeWindow()
+        self.api._window = window
+        self.api.open_gif(str(self.gif))
+        self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])
+        with self.assertLogs("pixelboard.app", "INFO"):
+            self.assertFalse(self.api.can_close())
+        self.assertIn(f"window.studio.onCloseBlocked({json.dumps(MSG_LOCKED)})", window.wait_js())
+        self.assertTrue(self.api.confirm_flash()["ok"])
+        self.assertTrue(self.api.can_close())
+
+    def test_close_blocked_ui_error_is_logged(self):
+        self.api._window = FakeWindow(error=RuntimeError("window gone"))
+        self.api.open_gif(str(self.gif))
+        self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])
+        with self.assertLogs("pixelboard.app", "ERROR") as logs:
+            self.assertFalse(self.api.can_close())
+            deadline = time.monotonic() + 2
+            while not any("ERROR" in line for line in logs.output) and time.monotonic() < deadline:
+                time.sleep(0.005)
+        self.assertTrue(self.api.cancel_flash()["ok"])
+        self.assertTrue(self.api.can_close())
 
     def test_stop_flash_without_flash(self):
         self.assertTrue(self.api.stop_flash()["ok"])
