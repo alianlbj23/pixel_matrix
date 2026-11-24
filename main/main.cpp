@@ -57,7 +57,7 @@ void show_color(const char *name, uint8_t r, uint8_t g, uint8_t b) {
 
 void show_text_centered(const char *text) {
     g_panel->clearScreen();
-    const int x = (kPanelWidth - font5x7::text_width(text)) / 2;
+    const int x = (kCanvasWidth - font5x7::text_width(text)) / 2;
     const int y = (kPanelHeight - font5x7::kGlyphHeight) / 2;
     const int unsupported = font5x7::draw_text(text, x, y, [](int px, int py) {
         g_panel->drawPixelRGB888(static_cast<int16_t>(px), static_cast<int16_t>(py), 255, 255, 255);
@@ -83,10 +83,10 @@ void play_gif_forever() {
         ESP_LOGE(TAG, "GIF: no frames in gif_anim_data.cpp, nothing to play");
         return;
     }
-    if (gif_anim::kWidth != kPanelWidth || gif_anim::kHeight != kPanelHeight) {
-        ESP_LOGE(TAG, "GIF: data is %ux%u but panel is %ux%u; re-run menu.sh \"Convert GIF\"",
+    if (gif_anim::kWidth != kCanvasWidth || gif_anim::kHeight != kPanelHeight) {
+        ESP_LOGE(TAG, "GIF: data is %ux%u but canvas is %ux%u; re-run menu.sh \"Convert GIF\"",
                  static_cast<unsigned>(gif_anim::kWidth), static_cast<unsigned>(gif_anim::kHeight),
-                 static_cast<unsigned>(kPanelWidth), static_cast<unsigned>(kPanelHeight));
+                 static_cast<unsigned>(kCanvasWidth), static_cast<unsigned>(kPanelHeight));
         return;
     }
     ESP_LOGI(TAG, "GIF: playing %u frame(s)", static_cast<unsigned>(gif_anim::kFrameCount));

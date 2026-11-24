@@ -16,6 +16,7 @@ log = logging.getLogger("gif2c")
 MAX_INPUT_BYTES = 10 * 1024 * 1024
 MAX_FRAMES = 64
 MAX_SIDE = 256
+MAX_SPLIT = 8
 DEFAULT_DURATION_MS = 100
 MIN_DURATION_MS = 20
 MAX_DURATION_MS = 10000
@@ -31,23 +32,50 @@ def clamp_duration(value):
     return int(min(max(value, MIN_DURATION_MS), MAX_DURATION_MS))
 
 
-def _fit_frame(frame, width, height):
-    rgba = frame.convert("RGBA")
-    scale = min(width / rgba.width, height / rgba.height)
-    new_w = max(1, round(rgba.width * scale))
-    new_h = max(1, round(rgba.height * scale))
-    scaled = rgba.resize((new_w, new_h), Image.LANCZOS)
+def _paste_scaled(canvas, img, scale, cell_x, cell_w, cell_h):
+    """Scales img by `scale` and pastes it centered in the cell starting at column cell_x."""
+    new_w = max(1, min(cell_w, round(img.width * scale)))
+    new_h = max(1, min(cell_h, round(img.height * scale)))
+    scaled = img.resize((new_w, new_h), Image.LANCZOS)
+    canvas.paste(scaled, (cell_x + (cell_w - new_w) // 2, (cell_h - new_h) // 2), scaled)
+
+
+def _fit_frame(rgba, width, height):
     canvas = Image.new("RGB", (width, height), (0, 0, 0))
-    canvas.paste(scaled, ((width - new_w) // 2, (height - new_h) // 2), scaled)
+    scale = min(width / rgba.width, height / rgba.height)
+    _paste_scaled(canvas, rgba, scale, 0, width, height)
     return canvas.tobytes()
 
 
-def load_frames(path, width, height):
-    """Returns [(rgb888_bytes, duration_ms), ...]; raises GifError on bad input."""
+def _split_frame(rgba, bbox, split, width, height):
+    """Crops to bbox, cuts into `split` equal strips and fits each into its own panel."""
+    content = rgba.crop(bbox)
+    cell_w = width // split
+    edges = [round(i * content.width / split) for i in range(split + 1)]
+    strips = [content.crop((edges[i], 0, edges[i + 1], content.height)) for i in range(split)]
+    widest = max(s.width for s in strips)
+    scale = min(cell_w / widest, height / content.height)  # same scale for every panel
+    canvas = Image.new("RGB", (width, height), (0, 0, 0))
+    for i, strip in enumerate(strips):
+        _paste_scaled(canvas, strip, scale, i * cell_w, cell_w, height)
+    return canvas.tobytes()
+
+
+def load_frames(path, width, height, split=1):
+    """Returns [(rgb888_bytes, duration_ms), ...]; raises GifError on bad input.
+
+    split=1 fits the whole frame into width x height. split=N (chained panels) crops all
+    frames to their shared visible area, cuts it into N vertical strips and fits each strip
+    into one width/N x height panel, e.g. a pair of eyes -> one eye per panel.
+    """
     path = pathlib.Path(path)
     if not (isinstance(width, int) and isinstance(height, int)
             and 0 < width <= MAX_SIDE and 0 < height <= MAX_SIDE):
         raise GifError(f"target size must be 1..{MAX_SIDE}, got {width}x{height}")
+    if not (isinstance(split, int) and 1 <= split <= MAX_SPLIT):
+        raise GifError(f"split must be 1..{MAX_SPLIT}, got {split}")
+    if width % split != 0:
+        raise GifError(f"width {width} is not divisible by split {split}")
     if not path.is_file():
         raise GifError(f"file not found: {path}")
     size = path.stat().st_size
@@ -61,16 +89,25 @@ def load_frames(path, width, height):
             n_frames = getattr(im, "n_frames", 1)
             if n_frames > MAX_FRAMES:
                 raise GifError(f"too many frames: {n_frames} (max {MAX_FRAMES})")
-            frames = []
-            for frame in ImageSequence.Iterator(im):
-                duration = clamp_duration(frame.info.get("duration"))
-                frames.append((_fit_frame(frame, width, height), duration))
+            source = [(frame.convert("RGBA"), clamp_duration(frame.info.get("duration")))
+                      for frame in ImageSequence.Iterator(im)]
     except (UnidentifiedImageError, OSError) as exc:
         raise GifError(f"cannot read GIF {path}: {exc}") from exc
 
-    if not frames:
+    if not source:
         raise GifError(f"GIF has no frames: {path}")
-    return frames
+    if split == 1:
+        return [(_fit_frame(rgba, width, height), d) for rgba, d in source]
+
+    # Union of visible areas over all frames, so content does not jump between frames.
+    boxes = [box for box in (rgba.getchannel("A").getbbox() for rgba, _ in source) if box]
+    if not boxes:
+        raise GifError(f"GIF has no visible pixels: {path}")
+    bbox = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+    if bbox[2] - bbox[0] < split:
+        raise GifError(f"visible area is {bbox[2] - bbox[0]} px wide, too narrow to split in {split}")
+    return [(_split_frame(rgba, bbox, split, width, height), d) for rgba, d in source]
 
 
 def render_cpp(frames, width, height, source_name):
@@ -110,10 +147,12 @@ def main(argv=None):
     parser.add_argument("output", help="generated .cpp path")
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--height", type=int, default=32)
+    parser.add_argument("--split", type=int, default=1,
+                        help="cut the visible area into N strips, one per chained panel")
     args = parser.parse_args(argv)
 
     try:
-        frames = load_frames(args.input, args.width, args.height)
+        frames = load_frames(args.input, args.width, args.height, args.split)
     except GifError as exc:
         log.error("%s", exc)
         return 1

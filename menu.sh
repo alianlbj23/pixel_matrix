@@ -106,9 +106,23 @@ do_tests() {
     run_step "Host unit tests (gif2c)" python3 -m unittest discover -s test/host -p 'test_*.py'
 }
 
+# Reads `constexpr ... <name> = <number>;` from main/board_config.h into the named variable.
+read_board_value() {
+    local name="$1" value
+    value="$(sed -n "s/^constexpr [a-z0-9_]* ${name} = \([0-9]\+\);.*/\1/p" main/board_config.h)"
+    if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < 1 || value > 256 )); then
+        echo "Cannot read ${name} from main/board_config.h (got '${value}')" >&2
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
 # Pick a GIF from assets/gif/ and regenerate main/gif_anim_data.cpp (then Build + flash).
 do_convert_gif() {
-    local gifs=() g
+    local gifs=() g pw ph chain split=1
+    pw="$(read_board_value kPanelWidth)" || return 1
+    ph="$(read_board_value kPanelHeight)" || return 1
+    chain="$(read_board_value kPanelChain)" || return 1
     for g in assets/gif/*.gif; do
         [[ -f "$g" ]] && gifs+=("$g")
     done
@@ -121,7 +135,19 @@ do_convert_gif() {
         if [[ -n "${g:-}" ]]; then break; fi
         echo "Invalid choice"
     done
-    run_step "Convert $g" python3 tools/gif2c.py "$g" main/gif_anim_data.cpp
+    if (( chain > 1 )); then
+        local layouts=("Split: one part per panel (e.g. a pair of eyes)" "Whole GIF stretched across all ${chain} panels")
+        echo "Layout for ${chain} chained panels:"
+        select _ in "${layouts[@]}"; do
+            case "$REPLY" in
+                1) split="$chain"; break ;;
+                2) split=1; break ;;
+                *) echo "Invalid choice" ;;
+            esac
+        done
+    fi
+    run_step "Convert $g" python3 tools/gif2c.py "$g" main/gif_anim_data.cpp \
+        --width $(( pw * chain )) --height "$ph" --split "$split"
 }
 
 options=(

@@ -9,3 +9,9 @@ sdkconfig.old
 # Python
 __pycache__/
 *.pyc
+
+# Brainstorming mockups (local only)
+.superpowers/
+
+# Local tool state
+.serena/

@@ -10,10 +10,13 @@
 // ---------------------------------------------------------------------------
 constexpr bool kPanelClkPhase = false;
 
-// Panel resolution (Waveshare RGB-Matrix-P3-64x32, a single panel)
+// Panel resolution (Waveshare RGB-Matrix-P3-64x32). Two panels daisy-chained with a HUB75
+// ribbon (panel 1 OUT -> panel 2 IN) form one 128x32 canvas; x 0..63 / 64..127 per panel.
+// menu.sh "Convert GIF" reads these three values.
 constexpr uint16_t kPanelWidth = 64;
 constexpr uint16_t kPanelHeight = 32;
-constexpr uint16_t kPanelChain = 1;
+constexpr uint16_t kPanelChain = 2;
+constexpr uint16_t kCanvasWidth = kPanelWidth * kPanelChain;
 
 // Brightness 0-255. Kept low to limit current draw.
 constexpr uint8_t kPanelBrightness = 90;
