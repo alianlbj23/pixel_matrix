@@ -424,9 +424,9 @@ class StudioApi:
         finally:
             self._lock.release()
 
-    def _close_pending(self) -> None:
+    def _close_pending(self, reset: bool = False) -> None:
         if self._pending is not None:
-            self._pending[0].close()
+            self._pending[0].close(reset=reset)
             self._pending = None
 
     def _end_flashing(self) -> None:
@@ -489,7 +489,7 @@ class StudioApi:
             return _fail(to_board_error(exc).user_message)
         finally:
             if flasher is not None:
-                flasher.close()
+                flasher.close(reset=True)  # connected but nothing written: leave download mode
             if not prepared:
                 self._end_flashing()
             self._lock.release()
@@ -522,7 +522,7 @@ class StudioApi:
 
     def cancel_flash(self) -> dict:
         with self._lock:
-            self._close_pending()
+            self._close_pending(reset=True)  # nothing written: restart the board out of download mode
             self._end_flashing()
         return {"ok": True}
 

@@ -52,8 +52,9 @@ class FakeFlasher(Flasher):
     def hard_reset(self):
         self.reset = True
 
-    def close(self):
+    def close(self, reset=False):
         self.closed = True
+        self.closed_with_reset = reset
         self._esp = None
 
 
@@ -472,6 +473,7 @@ class FlashApiTest(ApiTestCase):
         self.assertTrue(self.api.prepare_flash(PLACEMENT, None)["ok"])
         self.assertTrue(self.api.cancel_flash()["ok"])
         self.assertTrue(FakeFlasher.instances[-1].closed)
+        self.assertTrue(FakeFlasher.instances[-1].closed_with_reset)  # not left in download mode
         self.assertFalse(self.api.confirm_flash()["ok"])
 
     def test_nothing_to_flash(self):
@@ -497,6 +499,7 @@ class FlashApiTest(ApiTestCase):
         self.assertTrue(res["up_to_date"])
         self.assertIn("最新", res["message"])
         self.assertTrue(FakeFlasher.instances[-1].closed)
+        self.assertTrue(FakeFlasher.instances[-1].closed_with_reset)
         self.assertTrue(self.api.render_preview(PLACEMENT)["ok"])
 
     def test_firmware_only_must_be_bool(self):

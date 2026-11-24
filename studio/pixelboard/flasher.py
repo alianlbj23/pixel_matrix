@@ -188,8 +188,14 @@ class Flasher:
             log.exception("reset failed")
             raise to_board_error(exc) from exc
 
-    def close(self) -> None:
+    def close(self, reset: bool = False) -> None:
+        """Closes the port; reset=True first restarts the board so it does not stay in download mode."""
         if self._esp is not None:
+            if reset:
+                try:
+                    self.hard_reset()
+                except BoardError:
+                    log.warning("reset before closing %s failed", self.port)
             try:
                 self._esp._port.close()
             except Exception:  # noqa: BLE001
