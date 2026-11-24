@@ -13,6 +13,21 @@ let busy = false;
 let auditionIndex = -1;   // track being auditioned, -1 when stopped
 let musicState = null;
 
+// Transitional (Task 6): the backend now takes a placement dict and keeps the panel arrangement
+// itself; Task 7 replaces the chain/swap controls with the arrangement editor.
+function placement() {
+  return {
+    mode: layout.split ? "split" : "whole", offset_x: layout.offset_x, offset_y: layout.offset_y,
+    scale: layout.scale, brightness: layout.brightness,
+  };
+}
+
+async function setPanelCount(n) {
+  const res = await api().set_panel_count(n);
+  if (!res.ok) { setStatus(res.message, "error"); return; }
+  update({ chain: res.arrangement.panels.length });
+}
+
 const KIND_TEXT = {
   first_install: "首次安裝：會寫入完整韌體、GIF 和音樂",
   update_firmware: "更新韌體：會一併更新韌體",
@@ -126,7 +141,7 @@ async function refreshPreview() {
     drawFrame();
     return;
   }
-  const res = await api().render_preview(layout);
+  const res = await api().render_preview(placement());
   if (!res.ok) {
     setStatus(res.message, "error");
     return;
@@ -163,7 +178,7 @@ function update(changes) {
 }
 
 function bindControls() {
-  for (const b of $("chain").children) b.addEventListener("click", () => update({ chain: Number(b.dataset.value) }));
+  for (const b of $("chain").children) b.addEventListener("click", () => setPanelCount(Number(b.dataset.value)));
   for (const b of $("split").children) b.addEventListener("click", () => update({ split: b.dataset.value === "true" }));
   for (const b of document.querySelectorAll(".nudge [data-dx]")) {
     b.addEventListener("click", () => update({
@@ -366,7 +381,7 @@ async function flash() {
   setStatus("讀取板子狀態中…");
   try {
     const port = $("port").value || null;
-    const plan = await api().prepare_flash(layout, port);
+    const plan = await api().prepare_flash(placement(), port);
     if (!plan.ok) { setStatus(plan.message, "error"); return; }
     setStatus("");
     if (!(await confirmDialog(plan))) {
@@ -386,13 +401,15 @@ async function flash() {
 }
 
 // ---------------------------------------------------------------------------
-window.addEventListener("pywebviewready", () => {
+window.addEventListener("pywebviewready", async () => {
   bindControls();
   $("find").addEventListener("click", findBoard);
   $("pick-gif").addEventListener("click", () => pick("gif"));
   $("change-gif").addEventListener("click", () => pick("gif"));
   $("pick-mp3").addEventListener("click", () => pick("mp3"));
   $("flash").addEventListener("click", flash);
+  const arr = await api().get_arrangement();
+  if (arr.ok) layout.chain = arr.arrangement.panels.length;
   syncControls();
   refreshPreview();
   findBoard();

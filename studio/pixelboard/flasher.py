@@ -1,8 +1,9 @@
 """Thin wrapper over the esptool 5 Python API with progress reporting and friendly errors."""
 import logging
+import threading
 from typing import Callable, Optional
 
-from .board import BoardError
+from .board import GIF_OFFSET, BoardError
 
 log = logging.getLogger(__name__)
 
@@ -14,7 +15,11 @@ MSG_CONNECT = "無法讓板子進入燒錄模式：請按住 BOOT 鍵、按一�
 MSG_INTERRUPTED = "燒錄中斷，請確認 USB 線沒有鬆脫，重新插上後再按一次燒錄"
 MSG_UNEXPECTED = "發生未預期的錯誤："
 
-Progress = Callable[[str, float], None]
+CHUNK = 0x10000          # gif/audio regions are written (and can be stopped) in 64 KiB steps
+STOPPABLE_FROM = GIF_OFFSET  # below this: bootloader, partition table, app - always written whole
+
+# progress(stage, fraction[, stoppable]); write_chunked always passes stoppable.
+Progress = Callable[..., None]
 
 
 def to_board_error(exc: Exception) -> BoardError:
@@ -71,15 +76,25 @@ class Flasher:
 
     def __init__(self, port: str, progress: Optional[Progress] = None):
         self.port = port
-        self.progress = progress or (lambda stage, fraction: None)
+        self.progress = progress or (lambda *args: None)
         self._esp = None
+        self._bar = None  # (done, size, total, stoppable) of the piece write_chunked is writing
+
+    def _on_bar(self, stage: str, fraction: float) -> None:
+        """esptool progress bars: inside write_chunked they become overall write progress."""
+        bar = self._bar
+        if bar is None:
+            self.progress(stage, fraction)
+            return
+        done, size, total, stoppable = bar
+        self.progress("write", min(1.0, (done + fraction * size) / total), stoppable)
 
     def connect(self) -> None:
         try:
             from esptool import cmds
             from esptool.logger import log as esptool_log
 
-            esptool_log.set_logger(_make_logger(self.progress))
+            esptool_log.set_logger(_make_logger(self._on_bar))
             self.progress("connect", 0.0)
             esp = cmds.detect_chip(self.port, BAUD, connect_attempts=CONNECT_ATTEMPTS)
             if esp.CHIP_NAME != "ESP32-S3":
@@ -108,6 +123,47 @@ class Flasher:
         except Exception as exc:  # noqa: BLE001
             log.exception("write failed")
             raise to_board_error(exc) from exc
+
+    def _write_piece(self, offset: int, data: bytes) -> None:
+        esp = self._require()
+        try:
+            from esptool import cmds
+
+            cmds.write_flash(esp, [(offset, data)])
+        except Exception as exc:  # noqa: BLE001
+            log.exception("write failed at 0x%x", offset)
+            raise to_board_error(exc) from exc
+
+    def write_chunked(self, regions: list, stop: threading.Event, chunk: int = CHUNK) -> bool:
+        """Writes [(offset, bytes)] in order; returns False if `stop` ended it early.
+
+        Regions below STOPPABLE_FROM (firmware) are written whole and never interrupted, so a
+        stop can not leave the board unable to boot. gif/audio regions are written in `chunk`
+        steps and `stop` is checked before each step. Progress is reported over all regions as
+        progress("write", fraction, stoppable).
+        """
+        if chunk <= 0 or chunk % 0x1000:
+            raise ValueError(f"chunk must be a positive multiple of 4096, got {chunk}")
+        self._require()
+        total = sum(len(data) for _, data in regions) or 1
+        done = 0
+        for offset, data in regions:
+            stoppable = offset >= STOPPABLE_FROM
+            step = chunk if stoppable else max(1, len(data))
+            for start in range(0, len(data), step):
+                if stoppable and stop.is_set():
+                    log.info("flash stopped before 0x%x", offset + start)
+                    return False
+                piece = data[start:start + step]
+                self.progress("write", min(1.0, done / total), stoppable)
+                self._bar = (done, len(piece), total, stoppable)
+                try:
+                    self._write_piece(offset + start, piece)
+                finally:
+                    self._bar = None
+                done += len(piece)
+                self.progress("write", min(1.0, done / total), stoppable)
+        return True
 
     def read(self, offset: int, size: int) -> bytes:
         esp = self._require()
