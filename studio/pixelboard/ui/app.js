@@ -660,11 +660,16 @@ function setFlashPhase(phase) {
   syncControls();
 }
 
+// Title of the 安裝/更新韌體 confirm dialog; only promises the GIF and music stay when the plan says so.
+function firmwareTitle(plan) {
+  if (plan.kind === "first_install") return "首次安裝：寫入完整韌體";
+  if (plan.music_may_be_lost === true) return "安裝/更新韌體：只寫入韌體，但板子上原本的音樂可能無法播放";
+  return "安裝/更新韌體：只寫入韌體，不會改動板子上的 GIF 和音樂";
+}
+
 function confirmDialog(plan, firmwareOnly) {
   return new Promise((resolve) => {
-    $("confirm-title").textContent = firmwareOnly
-      ? "安裝/更新韌體：只寫入韌體，不會改動板子上的 GIF 和音樂"
-      : KIND_TEXT[plan.kind] || "確認燒錄";
+    $("confirm-title").textContent = firmwareOnly ? firmwareTitle(plan) : KIND_TEXT[plan.kind] || "確認燒錄";
     const notes = Array.isArray(plan.notes) ? plan.notes.filter((n) => typeof n === "string") : [];
     $("confirm-notes").replaceChildren(...notes.map((n) => {
       const li = document.createElement("li");

@@ -435,7 +435,8 @@ class StudioApi:
             self._flashing = False
 
     def prepare_flash(self, placement: Optional[dict], port: Optional[str], firmware_only: bool = False) -> dict:
-        """Connects, reads the board and returns what will be written: {"ok","kind","notes","bytes"}.
+        """Connects, reads the board and returns what will be written:
+        {"ok", "kind", "notes", "music_may_be_lost", "bytes"}.
 
         firmware_only=True plans bootloader/partition table/app only (placement is ignored); if the
         board already runs this firmware the answer is {"ok": False, "up_to_date": True, ...}.
@@ -477,6 +478,7 @@ class StudioApi:
             prepared = True
             log.info("flash plan on %s: %s %s", port, plan.kind, [hex(o) for o, _ in plan.regions])
             return {"ok": True, "kind": plan.kind, "notes": plan.notes,
+                    "music_may_be_lost": plan.music_may_be_lost,
                     "bytes": sum(len(d) for _, d in plan.regions)}
         except (gifproc.GifError, pxa.PxaError) as exc:
             return _fail(exc.user_message)

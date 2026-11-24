@@ -73,6 +73,7 @@ class FlashPlan(NamedTuple):
     kind: str       # "first_install" | "update_firmware" | "update_content"
     regions: list   # [(offset, bytes)] in ascending offset order
     notes: list     # plain-language notes shown before flashing
+    music_may_be_lost: bool = False  # new partition table, no new music: old music may not play
 
 
 def _cstr(raw: bytes) -> str:
@@ -137,6 +138,7 @@ def plan_flash(state: BoardState, bundled: dict, bundled_app: AppInfo,
         notes.append(NOTE_NO_MUSIC)
     elif table_differs:
         notes.append(NOTE_READD_MUSIC)
+        return FlashPlan(kind, regions, notes, music_may_be_lost=True)
     else:
         notes.append(NOTE_KEEP_MUSIC)
     return FlashPlan(kind, regions, notes)

@@ -70,6 +70,13 @@ class PlanFlashTest(unittest.TestCase):
     def test_new_table_without_music_warns_to_readd(self):
         plan = self.plan(BUNDLED_APP, table=OLD_PART, audio=None)
         self.assertTrue(any("重新加入音樂" in n for n in plan.notes), plan.notes)
+        self.assertTrue(plan.music_may_be_lost)
+
+    def test_music_kept_or_replaced_is_not_lost(self):
+        self.assertFalse(self.plan(BUNDLED_APP, audio=None).music_may_be_lost)
+        self.assertFalse(self.plan(AppInfo("pixel-board", "0.9.0"), audio=None).music_may_be_lost)
+        self.assertFalse(self.plan(BUNDLED_APP, table=OLD_PART).music_may_be_lost)
+        self.assertFalse(self.plan(None, audio=None).music_may_be_lost)
 
     def test_nothing_to_flash(self):
         with self.assertRaises(BoardError) as cm:

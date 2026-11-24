@@ -30,10 +30,11 @@ class FakeFlasher(Flasher):
     instances = []
     on_piece = None  # optional callback(offset) run after each written piece
 
-    def __init__(self, port, progress=None, connect_error=None, blank=False, app_md5=None):
+    def __init__(self, port, progress=None, connect_error=None, blank=False, app_md5=None, table=PART):
         super().__init__(port, progress)
         self.connect_error, self.blank = connect_error, blank
         self.app_md5 = app_md5  # None: the board's app equals the bundled one
+        self.table = table
         self.pieces, self.closed, self.reset = [], False, False
         FakeFlasher.instances.append(self)
 
@@ -45,7 +46,7 @@ class FakeFlasher(Flasher):
     def read(self, offset, size):
         if self.blank:
             return b"\xff" * size
-        return {0x10000: APP_HEAD, 0x8000: PART}[offset][:size]
+        return {0x10000: APP_HEAD, 0x8000: self.table}[offset][:size]
 
     def flash_md5(self, offset, size):
         assert offset == 0x10000, offset
@@ -549,6 +550,21 @@ class FlashApiTest(ApiTestCase):
         self.assertEqual(plan["bytes"], len(IMAGES["app"]))
         self.assertTrue(api.confirm_flash()["ok"])
         self.assertEqual(written(FakeFlasher.instances[-1]), {0x10000: IMAGES["app"]})
+
+    def test_firmware_only_old_table_flags_music(self):
+        old_table = PART[:40] + bytes([PART[40] ^ 0xFF]) + PART[41:]
+        api = self.make_api(flasher_factory=lambda port, progress=None: FakeFlasher(port, progress, table=old_table))
+        plan = api.prepare_flash(None, None, firmware_only=True)
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["kind"], "update_firmware")
+        self.assertIs(plan["music_may_be_lost"], True)
+        self.assertTrue(api.cancel_flash()["ok"])
+
+    def test_plan_without_music_risk(self):
+        api = self.make_api(flasher_factory=lambda port, progress=None: FakeFlasher(port, progress, app_md5="0" * 32))
+        plan = api.prepare_flash(None, None, firmware_only=True)
+        self.assertIs(plan["music_may_be_lost"], False)
+        self.assertTrue(api.cancel_flash()["ok"])
 
     def test_firmware_only_must_be_bool(self):
         res = self.api.prepare_flash(PLACEMENT, None, firmware_only="yes")
