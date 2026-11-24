@@ -19,6 +19,10 @@ constexpr uint16_t kPanelWidth = 64;
 constexpr uint16_t kPanelHeight = 32;
 constexpr uint16_t kPanelChain = 2;
 
+// Most panels the firmware drives in one chain (PXG v2 and "PXB IDENTIFY <n>" accept 1..kMaxPanels).
+// Must match MAX_PANELS in studio/pixelboard/layout.py.
+constexpr int kMaxPanels = 8;
+
 // Fallback brightness 0-255 (PXG1 allows 10-128). Kept low to limit current draw.
 constexpr uint8_t kPanelBrightness = 90;
 

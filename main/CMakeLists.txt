@@ -1,8 +1,8 @@
-idf_component_register(SRCS "main.cpp" "font5x7.cpp" "tone.cpp" "audio.cpp"
+idf_component_register(SRCS "main.cpp" "font5x7.cpp" "tone.cpp" "audio.cpp" "cmd.cpp" "identify.cpp"
                             "media.cpp" "mp3_player.cpp" "pxg.cpp" "pxa.cpp" "crc32.cpp"
                        INCLUDE_DIRS "."
                        REQUIRES ESP32-HUB75-MatrixPanel-DMA esp_codec_dev esp_driver_i2c esp_driver_i2s
-                                esp_audio_codec esp_partition)
+                                esp_audio_codec esp_partition esp_driver_usb_serial_jtag)
 
 # Developer music: pack assets/audio/*.mp3 into a PXA1 image (tools/pack_audio.py, stdlib only) and
 # write it to the "audio" partition on `idf.py flash`. The build fails on invalid MP3s or > 10 MB.

@@ -116,6 +116,16 @@ do_tests() {
             'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_pxa.cpp main/pxa.cpp main/crc32.cpp -o "$1" && "$1"' _ "$out"
         rc=$?
     fi
+    if [[ $rc -eq 0 ]]; then
+        run_step "Host unit tests (cmd)" bash -c \
+            'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_cmd.cpp main/cmd.cpp -o "$1" && "$1"' _ "$out"
+        rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+        run_step "Host unit tests (identify)" bash -c \
+            'g++ -std=c++17 -Wall -Wextra -Werror -I main test/host/test_identify.cpp main/identify.cpp main/font5x7.cpp -o "$1" && "$1"' _ "$out"
+        rc=$?
+    fi
     rm -f "$out"
     [[ $rc -eq 0 ]] || return $rc
     ensure_studio_venv || return 1

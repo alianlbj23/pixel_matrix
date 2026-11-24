@@ -1,4 +1,5 @@
-// Minimal 5x7 bitmap font, only the characters this step needs.
+// Minimal 5x7 bitmap font, only the characters the firmware draws ("HELLO", "NO GIF", digits and
+// the identify arrow '^').
 #pragma once
 
 #include <cstdint>

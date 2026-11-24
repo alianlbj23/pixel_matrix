@@ -30,7 +30,7 @@ constexpr size_t kInitialOutSize = 4608;   // one MPEG-1 Layer III frame, 16-bit
 constexpr size_t kMaxOutSize = 64 * 1024;  // refuse absurd decoder buffer requests
 constexpr uint32_t kTaskStack = 8192;
 constexpr UBaseType_t kTaskPriority = 5;
-constexpr BaseType_t kTaskCore = 1;  // app_main (GIF loop) runs on core 0
+constexpr BaseType_t kTaskCore = 1;  // the GIF and command tasks run on core 0
 
 bool g_started = false;
 const esp_partition_t *g_part = nullptr;
