@@ -331,6 +331,32 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The new release must be strictly newer than the current latest one and its tag must not exist:
+      # re-running an old workflow run or lowering studio/VERSION would otherwise take "latest" from a
+      # newer release (installed apps would not update to it and the real newest build would be hidden).
+      - name: Check the version is new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null; then
+            echo "::error::tag v$VERSION already exists"
+            exit 1
+          fi
+          err="$RUNNER_TEMP/gh-latest.err"
+          if latest="$(gh release view --json tagName -q .tagName 2> "$err")"; then
+            echo "Latest release: $latest"
+          elif grep -qi 'release not found' "$err"; then
+            latest=""
+            echo "No release yet"
+          else
+            cat "$err" >&2
+            echo "::error::could not read the latest release"
+            exit 1
+          fi
+          python3 studio/ci/check_release_version.py "$VERSION" "$latest"
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: studio-*
