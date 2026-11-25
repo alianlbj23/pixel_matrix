@@ -857,14 +857,27 @@ class PlumbingTests(unittest.TestCase):
         self.assertIsNone(updater.current_executable(frozen=False))
         self.assertEqual(updater.current_executable(frozen=True, system="win32", executable=r"C:\A\P.exe", env={}),
                          Path(r"C:\A\P.exe"))
-        self.assertEqual(updater.current_executable(frozen=True, system="linux", executable="/tmp/.mount/x",
-                                                    env={"APPIMAGE": "/home/u/P.AppImage"}),
-                         Path("/home/u/P.AppImage"))
+        with tempfile.TemporaryDirectory() as tmp:
+            appimage = Path(tmp) / "P.AppImage"
+            appimage.write_bytes(b"appimage")
+            self.assertEqual(updater.current_executable(frozen=True, system="linux", executable="/tmp/.mount/x",
+                                                        env={"APPIMAGE": str(appimage)}), appimage)
+            for bad in ("P.AppImage", "./P.AppImage", str(Path(tmp) / "missing.AppImage"), tmp, " "):
+                with self.subTest(appimage=bad), self.assertLogs(updater.log, "WARNING") if bad.strip() \
+                        else contextlib.nullcontext():
+                    self.assertIsNone(updater.current_executable(frozen=True, system="linux", executable="/x",
+                                                                 env={"APPIMAGE": bad}))
         self.assertIsNone(updater.current_executable(frozen=True, system="linux", executable="/x", env={}))
         self.assertEqual(updater.current_executable(
             frozen=True, system="darwin", executable="/Applications/P S.app/Contents/MacOS/P", env={}),
             Path("/Applications/P S.app"))
         self.assertIsNone(updater.current_executable(frozen=True, system="darwin", executable="/usr/bin/x", env={}))
+
+    def test_no_executable_reason(self):
+        self.assertEqual(updater.no_executable_reason(frozen=False, system="linux"), "目前是從原始碼執行，無法自動更新")
+        self.assertEqual(updater.no_executable_reason(frozen=True, system="linux"),
+                         "請直接執行下載的 AppImage 檔案才能自動更新")
+        self.assertEqual(updater.no_executable_reason(frozen=True, system="darwin"), updater.MSG_UNSUPPORTED)
 
     def test_http_rejects_non_https(self):
         with mock.patch.object(updater.urllib.request, "build_opener", side_effect=AssertionError("opened")):

@@ -59,6 +59,8 @@ MSG_NO_PERMISSION_NO_BROWSER = f"沒有權限更新程式所在的資料夾，�
 MSG_INSTALL = "無法替換程式檔案"
 MSG_RESTART = "無法自動重新開啟程式；新版本會在下次開啟時生效"
 MSG_CANCELLED = "已取消更新"
+MSG_FROM_SOURCE = "目前是從原始碼執行，無法自動更新"
+MSG_RUN_APPIMAGE = "請直接執行下載的 AppImage 檔案才能自動更新"
 
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 _KEY_RE = re.compile(r"[a-z0-9_-]{1,32}")
@@ -699,8 +701,26 @@ def current_executable(*, frozen: Optional[bool] = None, system: Optional[str] =
             if parent.suffix == ".app":
                 return parent
         return None
-    appimage = (env.get("APPIMAGE") or "").strip()
-    return Path(appimage) if appimage else None
+    # Linux: the AppImage runtime sets $APPIMAGE to the AppImage file; validate it (external input).
+    appimage = env.get("APPIMAGE")
+    if not isinstance(appimage, str) or not appimage.strip():
+        return None
+    path = Path(appimage)
+    if not path.is_absolute() or not path.is_file():
+        log.warning("ignoring APPIMAGE=%r: not an absolute path to an existing file", appimage)
+        return None
+    return path
+
+
+def no_executable_reason(*, frozen: Optional[bool] = None, system: Optional[str] = None) -> str:
+    """The user message explaining why current_executable() is None (no automatic update)."""
+    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    system = sys.platform if system is None else system
+    if not frozen:
+        return MSG_FROM_SOURCE
+    if system.startswith("linux"):
+        return MSG_RUN_APPIMAGE   # packaged, but not started as the AppImage file (e.g. extracted)
+    return MSG_UNSUPPORTED
 
 
 def _child_env() -> dict:

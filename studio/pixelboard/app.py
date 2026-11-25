@@ -58,7 +58,6 @@ MAX_CANVAS = 1024          # LED px per side; bounds memory for previews and a c
 IDENTIFY_HOLD_S = 5.5      # firmware shows the identify screen 5 s; a second command meanwhile replies late
 MSG_UPDATE_FAILED = "更新失敗：{reason}，你可以繼續使用目前的版本"
 MSG_NO_UPDATE = "目前沒有可以安裝的新版本"
-MSG_FROM_SOURCE = "目前是從原始碼執行，無法自動更新"
 MSG_UNEXPECTED = "發生未預期的錯誤"
 MSG_NO_UPDATE_RUNNING = "目前沒有進行中的更新"
 MSG_CANNOT_CANCEL = "正在安裝新版本，無法取消"
@@ -172,7 +171,8 @@ class StudioApi:
                  images_loader: Callable = None, layout_path=None, identify_fn: Callable = None,
                  clock: Callable = None, updater_check: Callable = None, updater_download: Callable = None,
                  updater_install: Callable = None, current_version: Optional[str] = None,
-                 platform_key: Callable = None, executable: Callable = None):
+                 platform_key: Callable = None, executable: Callable = None,
+                 no_executable_reason: Callable = None):
         self._window = None  # set by run(); underscore keeps it out of the JS bridge
         self._list_ports = list_ports or list_system_ports
         self._flasher_factory = flasher_factory or Flasher
@@ -197,6 +197,7 @@ class StudioApi:
         self._current_version = current_version if current_version is not None else version.current_version()
         self._platform_key = platform_key or updater.platform_key
         self._executable = executable or updater.current_executable
+        self._no_executable_reason = no_executable_reason or updater.no_executable_reason
         self._update_checked = threading.Event()  # set once the background check has finished
         self._update_thread = None
         self._update_manifest = None   # newer release found by the check (guarded by _state)
@@ -726,7 +727,8 @@ class StudioApi:
         try:
             exe = self._executable()
             if exe is None:
-                raise updater.UpdateError(MSG_FROM_SOURCE, "not a packaged build (running from source)")
+                raise updater.UpdateError(self._no_executable_reason(),
+                                          "no updatable executable (running from source or not as an AppImage)")
             key = self._platform_key()
             asset = manifest.assets.get(key)
             if asset is None:

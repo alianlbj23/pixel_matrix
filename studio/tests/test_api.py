@@ -1088,6 +1088,23 @@ class UpdateApiTest(ApiTestCase):
             self.assertFalse(api.start_update()["ok"])
         current.assert_called()
 
+    def test_update_frozen_linux_without_appimage(self):
+        api = self.update_api(executable=lambda: None, no_executable_reason=lambda: updater.MSG_RUN_APPIMAGE)
+        api.check_update()
+        with self.assertLogs("pixelboard.app", "WARNING"):
+            res = api.start_update()
+        self.assertEqual(res, update_failed("請直接執行下載的 AppImage 檔案才能自動更新"))
+        self.assertEqual(self.fake.downloads, [])
+        self.assertFalse(api.get_update_state()["updating"])
+        with mock.patch.object(updater.sys, "frozen", True, create=True), \
+                mock.patch.object(updater.sys, "platform", "linux"), \
+                mock.patch.dict(updater.os.environ, {"APPIMAGE": ""}):
+            api = self.update_api(executable=None, no_executable_reason=None)  # the real updater functions
+            api.check_update()
+            with self.assertLogs("pixelboard.app", "WARNING"):
+                res = api.start_update()
+        self.assertEqual(res, update_failed(updater.MSG_RUN_APPIMAGE))
+
     def test_start_update_without_new_version(self):
         api = self.update_api(FakeUpdater(manifest=None))
         api.check_update()
