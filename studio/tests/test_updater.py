@@ -487,8 +487,8 @@ class InstallTests(unittest.TestCase):
         text = helper.read_text(encoding="utf-8")
         self.assertIn("kill -0 4242", text)
         self.assertIn("sleep 0.2", text)
-        self.assertIn("mv ", text)
-        self.assertIn("open", text)
+        self.assertIn('"$MV" "$APP" "$OLD"', text)
+        self.assertIn('"$OPEN" "$APP"', text)
         self.assertIn(shlex.quote(str(app)), text)
         self.assertIn(shlex.quote(str(app) + ".old"), text)
         # new bundle is staged next to the old one; the old one is untouched until the helper runs
@@ -536,40 +536,123 @@ class InstallTests(unittest.TestCase):
         self.assertIn("下載的檔案不完整或已損壞", ctx.exception.user_message)
         self.assertEqual(os.listdir(self.install_dir), [APP])
 
-    @unittest.skipUnless(POSIX and os.path.exists("/bin/sh"), "needs /bin/sh")
-    def test_macos_helper_script_runs(self):
+    def _helper_setup(self, pid, open_ok=True, mv_fail_calls=(), wait_steps=updater.HELPER_WAIT_STEPS):
+        """Writes a helper for a fake bundle pair; fake `open` records what it opened, fake `mv` fails on
+        the given call numbers (1 = APP -> OLD, 2 = NEW -> APP, 3 = restore OLD -> APP)."""
+        work = Path(tempfile.mkdtemp(dir=self.root))
+        h = type("Helper", (), {})()
+        h.app = work / "My App's.app"
+        (h.app / "Contents").mkdir(parents=True)
+        (h.app / "Contents" / "v").write_text("old")
+        h.old = Path(str(h.app) + ".old")
+        h.staging = work / ".staging"
+        h.new_app = h.staging / "PixelBoard-Studio.app"
+        (h.new_app / "Contents").mkdir(parents=True)
+        (h.new_app / "Contents" / "v").write_text("new")
+        h.opened = work / "opened.txt"
+        h.log = work / "logs dir" / "update-helper.log"
+        fake_open = work / "fake open.sh"
+        fake_open.write_text(f'#!/bin/sh\ncat "$1/Contents/v" >> {shlex.quote(str(h.opened))}\n'
+                             f'exit {0 if open_ok else 1}\n')
+        os.chmod(fake_open, 0o755)
+        counter = work / "mv-count"
+        fails = " ".join(str(n) for n in mv_fail_calls) or "none"
+        fake_mv = work / "fake mv.sh"
+        fake_mv.write_text(f"""#!/bin/sh
+n=$(($(cat {shlex.quote(str(counter))} 2>/dev/null || echo 0) + 1))
+echo "$n" > {shlex.quote(str(counter))}
+for f in {fails}; do
+  if [ "$f" = "$n" ]; then echo "fake mv: call $n fails" >&2; exit 1; fi
+done
+exec /bin/mv "$@"
+""")
+        os.chmod(fake_mv, 0o755)
+        h.helper = h.staging / "update.sh"
+        h.helper.write_text(updater._macos_helper_script(h.app, h.new_app, h.staging, pid, open_cmd=str(fake_open),
+                                                         mv_cmd=str(fake_mv), log_file=h.log,
+                                                         wait_steps=wait_steps))
+        return h
+
+    def _run_helper(self, h):
+        return subprocess.run(["/bin/sh", str(h.helper)], timeout=60, capture_output=True)
+
+    def _dead_pid(self):
         proc = subprocess.Popen([sys.executable, "-c", "pass"])
         proc.wait()
-        dead_pid = proc.pid
+        return proc.pid
+
+    @unittest.skipUnless(POSIX and os.path.exists("/bin/sh"), "needs /bin/sh")
+    def test_macos_helper_script_runs(self):
+        dead_pid = self._dead_pid()
         for open_ok in (True, False):
             with self.subTest(open_ok=open_ok):
-                work = Path(tempfile.mkdtemp(dir=self.root))
-                app = work / "My App's.app"
-                (app / "Contents").mkdir(parents=True)
-                (app / "Contents" / "v").write_text("old")
-                staging = work / ".staging"
-                new_app = staging / "PixelBoard-Studio.app"
-                (new_app / "Contents").mkdir(parents=True)
-                (new_app / "Contents" / "v").write_text("new")
-                opened = work / "opened.txt"
-                fake_open = work / "fake open.sh"
-                fake_open.write_text(f'#!/bin/sh\ncat "$1/Contents/v" >> {shlex.quote(str(opened))}\n'
-                                     f'exit {0 if open_ok else 1}\n')
-                os.chmod(fake_open, 0o755)
-                helper = staging / "update.sh"
-                helper.write_text(updater._macos_helper_script(app, new_app, staging, dead_pid,
-                                                               open_cmd=str(fake_open)))
-                result = subprocess.run(["/bin/sh", str(helper)], timeout=60, capture_output=True)
-                self.assertFalse(staging.exists())
-                self.assertFalse(Path(str(app) + ".old").exists())
+                h = self._helper_setup(dead_pid, open_ok=open_ok)
+                result = self._run_helper(h)
+                self.assertFalse(h.staging.exists())
+                self.assertFalse(h.old.exists())
+                self.assertTrue(h.log.exists())  # output goes to the log, its folder is created
                 if open_ok:
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual((app / "Contents" / "v").read_text(), "new")
-                    self.assertEqual(opened.read_text(), "new")
+                    self.assertEqual(result.returncode, 0, h.log.read_text())
+                    self.assertEqual((h.app / "Contents" / "v").read_text(), "new")
+                    self.assertEqual(h.opened.read_text(), "new")
                 else:
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual((app / "Contents" / "v").read_text(), "old")
-                    self.assertEqual(opened.read_text(), "newold")
+                    self.assertEqual((h.app / "Contents" / "v").read_text(), "old")
+                    self.assertEqual(h.opened.read_text(), "newold")
+
+    @unittest.skipUnless(POSIX and os.path.exists("/bin/sh"), "needs /bin/sh")
+    def test_macos_helper_pid_timeout_leaves_old_app(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            h = self._helper_setup(proc.pid, wait_steps=1)
+            result = self._run_helper(h)
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((h.app / "Contents" / "v").read_text(), "old")  # untouched: it is still running
+        self.assertFalse(h.old.exists())
+        self.assertFalse(h.staging.exists())
+        self.assertFalse(h.opened.exists())  # the old app is still open; nothing is started
+        self.assertIn(f"pid {proc.pid} still running", h.log.read_text())
+
+    @unittest.skipUnless(POSIX and os.path.exists("/bin/sh"), "needs /bin/sh")
+    def test_macos_helper_mv_failures_reopen_old_app(self):
+        dead_pid = self._dead_pid()
+        for fail in ((1,), (2,)):
+            with self.subTest(mv_fail_calls=fail):
+                h = self._helper_setup(dead_pid, mv_fail_calls=fail)
+                result = self._run_helper(h)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((h.app / "Contents" / "v").read_text(), "old")
+                self.assertEqual(h.opened.read_text(), "old")  # the old app is opened again
+                self.assertFalse(h.old.exists())
+                self.assertFalse(h.staging.exists())
+                self.assertIn("fake mv: call", h.log.read_text())  # mv's stderr is logged too
+
+    @unittest.skipUnless(POSIX and os.path.exists("/bin/sh"), "needs /bin/sh")
+    def test_macos_helper_failed_restore_opens_remaining_app(self):
+        h = self._helper_setup(self._dead_pid(), mv_fail_calls=(2, 3))
+        result = self._run_helper(h)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(h.app.exists())
+        self.assertEqual((h.old / "Contents" / "v").read_text(), "old")  # old version kept, not deleted
+        self.assertEqual(h.opened.read_text(), "old")
+        self.assertIn("restoring", h.log.read_text())
+        self.assertIn("failed", h.log.read_text())
+
+    def test_macos_helper_validates_arguments(self):
+        app, new = self.root / "A.app", self.root / "s" / "A.app"
+        for kwargs in ({"pid": 0}, {"pid": True}, {"pid": 5, "wait_steps": 0}, {"pid": 5, "wait_steps": "3"}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    updater._macos_helper_script(app, new, new.parent, **kwargs)
+
+    def test_macos_helper_default_log_file(self):
+        text = updater._macos_helper_script(self.root / "A.app", self.root / "s" / "A.app", self.root / "s", 7)
+        expected = Path.home() / "Library" / "Logs" / "PixelBoard-Studio" / "update-helper.log"
+        self.assertIn(shlex.quote(str(expected)), text)
+        self.assertIn(f"-gt {updater.HELPER_WAIT_STEPS} ]", text)
 
     # --- permissions / dispatch ---
     def test_install_readonly_opens_release_page(self):

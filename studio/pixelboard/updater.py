@@ -28,7 +28,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, Mapping, NamedTuple, Optional
 
-from . import version
+from . import paths, version
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ MAX_SIZE = 600 * 1024 * 1024     # cap for any downloaded asset
 MAX_JSON_BYTES = 4 * 1024 * 1024  # cap for API / latest.json responses
 MAX_UNZIPPED = 2 * 1024 * 1024 * 1024
 HELPER_WAIT_STEPS = 300          # macOS helper: 300 x 0.2 s = 60 s for the old process to exit
+HELPER_LOG_NAME = "update-helper.log"  # macOS helper output, in ~/Library/Logs/PixelBoard-Studio/
 
 MSG_CORRUPT = "下載的檔案不完整或已損壞"
 MSG_NETWORK = "下載中斷，請確認網路連線後再試"
@@ -529,11 +530,20 @@ def _extract_app_zip(zip_path: Path, dest: Path) -> None:
                 os.chmod(target, stat.S_IMODE(mode) & 0o755)
 
 
-def _macos_helper_script(app: Path, new_app: Path, staging: Path, pid: int,
-                         open_cmd: str = "/usr/bin/open") -> str:
-    """POSIX sh: wait for pid, swap bundles (old kept as .old until the new one opens), open."""
+def _macos_helper_script(app: Path, new_app: Path, staging: Path, pid: int, *,
+                         open_cmd: str = "/usr/bin/open", mv_cmd: str = "/bin/mv",
+                         log_file: Optional[Path] = None, wait_steps: int = HELPER_WAIT_STEPS) -> str:
+    """POSIX sh: wait for pid, swap bundles (old kept as .old until the new one opens), open.
+
+    Every failure after the old process has exited opens an app again (the old one, restored when
+    needed); only when the old process does not exit in time is everything left untouched. All output
+    is appended to `log_file` (default ~/Library/Logs/PixelBoard-Studio/update-helper.log).
+    """
     if not _is_int(pid) or pid <= 0:
         raise ValueError(f"invalid pid {pid!r}")
+    if not _is_int(wait_steps) or wait_steps <= 0:
+        raise ValueError(f"invalid wait_steps {wait_steps!r}")
+    log_file = Path(log_file) if log_file is not None else paths.log_dir("darwin") / HELPER_LOG_NAME
     q = shlex.quote
     old = Path(str(app) + ".old")
     return f"""#!/bin/sh
@@ -545,28 +555,71 @@ NEW={q(str(new_app))}
 OLD={q(str(old))}
 STAGING={q(str(staging))}
 OPEN={q(open_cmd)}
+MV={q(mv_cmd)}
+LOG_DIR={q(str(log_file.parent))}
+LOG={q(str(log_file))}
+mkdir -p "$LOG_DIR" 2>/dev/null
+if ( : >> "$LOG" ) 2>/dev/null; then
+  exec >> "$LOG" 2>&1
+fi
+log() {{
+  echo "$(date '+%Y-%m-%d %H:%M:%S') update-helper[$$]: $*"
+}}
+open_any() {{
+  for candidate in "$APP" "$OLD"; do
+    if [ -d "$candidate" ]; then
+      if "$OPEN" "$candidate"; then
+        log "opened $candidate"
+        return 0
+      fi
+      log "could not open $candidate"
+    fi
+  done
+  log "no app could be opened"
+  return 1
+}}
+log "waiting for pid {pid} to exit before replacing $APP"
 waited=0
 while kill -0 {pid} 2>/dev/null; do
   waited=$((waited + 1))
-  if [ "$waited" -gt {HELPER_WAIT_STEPS} ]; then
+  if [ "$waited" -gt {wait_steps} ]; then
+    log "pid {pid} still running after {wait_steps} checks; leaving $APP untouched"
     rm -rf "$STAGING"
     exit 1
   fi
   sleep 0.2
 done
 rm -rf "$OLD"
-if [ -e "$OLD" ] || [ -L "$OLD" ] || ! mv "$APP" "$OLD"; then
+if [ -e "$OLD" ] || [ -L "$OLD" ]; then
+  log "cannot remove the stale $OLD; keeping the current version"
   rm -rf "$STAGING"
+  open_any
   exit 1
 fi
-if mv "$NEW" "$APP" && "$OPEN" "$APP"; then
-  rm -rf "$OLD"
+if ! "$MV" "$APP" "$OLD"; then
+  log "cannot move $APP aside; keeping the current version"
   rm -rf "$STAGING"
-  exit 0
+  open_any
+  exit 1
+fi
+if "$MV" "$NEW" "$APP"; then
+  if "$OPEN" "$APP"; then
+    log "updated $APP and opened it"
+    rm -rf "$OLD"
+    rm -rf "$STAGING"
+    exit 0
+  fi
+  log "could not open the new version; restoring the previous one"
+else
+  log "cannot move the new version into place; restoring the previous one"
 fi
 rm -rf "$APP"
-mv "$OLD" "$APP"
-"$OPEN" "$APP"
+if "$MV" "$OLD" "$APP"; then
+  log "restored the previous version to $APP"
+else
+  log "restoring $OLD to $APP failed"
+fi
+open_any
 rm -rf "$STAGING"
 exit 1
 """
