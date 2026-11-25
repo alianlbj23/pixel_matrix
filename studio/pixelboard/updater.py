@@ -235,10 +235,58 @@ def _request(url: str) -> urllib.request.Request:
     return urllib.request.Request(url, headers=headers)
 
 
+# System CA bundles, tried in order when the OpenSSL default paths do not exist (see _ssl_context).
+MACOS_CA_BUNDLES = ("/etc/ssl/cert.pem",)
+LINUX_CA_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt",   # Debian/Ubuntu
+                    "/etc/pki/tls/certs/ca-bundle.crt",     # Fedora/RHEL
+                    "/etc/ssl/ca-bundle.pem",               # openSUSE
+                    "/etc/ssl/cert.pem")                    # Arch, Alpine
+
+
+def ca_bundle_candidates(system: str = sys.platform):
+    if system == "darwin":
+        return MACOS_CA_BUNDLES
+    if system.startswith("linux"):
+        return LINUX_CA_BUNDLES
+    return ()   # Windows: create_default_context() reads the system certificate store
+
+
+def _ssl_context(*, verify_paths: Callable = ssl.get_default_verify_paths, system: Optional[str] = None,
+                 candidates=None) -> ssl.SSLContext:
+    """A verifying TLS context that also works in frozen builds.
+
+    A packaged app carries the build machine's OpenSSL OPENSSLDIR, which often does not exist on the
+    user's machine (macOS, Fedora/RHEL/openSUSE/Arch): every https request would then fail with
+    CERTIFICATE_VERIFY_FAILED. In that case the first existing system CA bundle is loaded instead.
+    """
+    ctx = ssl.create_default_context()
+    system = sys.platform if system is None else system
+    candidates = ca_bundle_candidates(system) if candidates is None else tuple(candidates)
+    if not candidates:
+        return ctx
+    paths = verify_paths()
+    cafile, capath = getattr(paths, "cafile", None), getattr(paths, "capath", None)
+    if (cafile and os.path.exists(cafile)) or (capath and os.path.exists(capath)):
+        return ctx
+    for bundle in candidates:
+        if not os.path.isfile(bundle):
+            continue
+        try:
+            ctx.load_verify_locations(cafile=bundle)
+        except (OSError, ssl.SSLError) as exc:
+            log.warning("could not load CA bundle %s: %s", bundle, exc)
+            continue
+        log.info("OpenSSL default CA paths %r / %r missing; using %s", cafile, capath, bundle)
+        return ctx
+    log.error("no CA certificates found: OpenSSL default paths %r / %r and system bundles %s do not exist; "
+              "https requests will fail certificate verification", cafile, capath, ", ".join(candidates))
+    return ctx
+
+
 def _open(url, timeout: float):
     _require_https(url)
     opener = urllib.request.build_opener(
-        _HttpsOnlyRedirectHandler(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        _HttpsOnlyRedirectHandler(), urllib.request.HTTPSHandler(context=_ssl_context()))
     return opener.open(_request(url), timeout=timeout)
 
 

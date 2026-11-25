@@ -13,6 +13,7 @@ import unittest
 import urllib.error
 import zipfile
 from pathlib import Path
+from typing import NamedTuple
 from unittest import mock
 
 from pixelboard import updater
@@ -633,6 +634,97 @@ class InstallTests(unittest.TestCase):
             with self.assertLogs(updater.log, "WARNING"):
                 updater.cleanup_old(exe)
         self.assertTrue(old.exists())
+
+
+# Self-signed test CA (certificate only, no key): loaded as a fallback CA bundle in SslContextTests.
+TEST_CA_PEM = """-----BEGIN CERTIFICATE-----
+MIIBkjCCATegAwIBAgIUQnoLckLinW09uRY6/80E6cEb5xgwCgYIKoZIzj0EAwIw
+HTEbMBkGA1UEAwwSUGl4ZWxCb2FyZCBUZXN0IENBMCAXDTI2MTEyNTAyMjIzMloY
+DzIxMjYxMTAxMDIyMjMyWjAdMRswGQYDVQQDDBJQaXhlbEJvYXJkIFRlc3QgQ0Ew
+WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATc0Df1mGNJbdQr6jKfTojCtDf5njmC
+lKCfOAhUEyJfyVjaWkqSKpPkQAKCC3jzCuuPRSu0O4sl4ThkkDfb+6+ho1MwUTAd
+BgNVHQ4EFgQU3SLKcwDFmlhH1TObBKAyPiqX2ZMwHwYDVR0jBBgwFoAU3SLKcwDF
+mlhH1TObBKAyPiqX2ZMwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBG
+AiEA5Q37DNyublVu/NN9zOlQ67+4b1ROehkiAWgxi7sAdzQCIQCWTEQbm+f7m+DV
+qpK4OxX5duwVLFrADj+qd0wl47fOVQ==
+-----END CERTIFICATE-----
+"""
+
+
+class FakeVerifyPaths(NamedTuple):
+    cafile: object
+    capath: object
+
+
+class SslContextTests(unittest.TestCase):
+    """Frozen apps carry the build machine's OpenSSL paths; missing ones fall back to the system bundle."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.ca = self.dir / "cert.pem"
+        self.ca.write_text(TEST_CA_PEM, encoding="ascii")
+        self.missing = self.dir / "missing"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _has_test_ca(ctx):
+        return any(("commonName", "PixelBoard Test CA") in rdn
+                   for cert in ctx.get_ca_certs() for rdn in cert.get("subject", ()))
+
+    def test_fallback_bundle_loaded_when_default_paths_missing(self):
+        paths = FakeVerifyPaths(str(self.missing / "cert.pem"), str(self.missing / "certs"))
+        for system in ("darwin", "linux"):
+            with self.subTest(system=system), self.assertLogs(updater.log, "INFO") as logs:
+                ctx = updater._ssl_context(verify_paths=lambda: paths, system=system,
+                                           candidates=(str(self.missing / "a.pem"), str(self.ca)))
+            self.assertTrue(self._has_test_ca(ctx))
+            self.assertIn(str(self.ca), "\n".join(logs.output))
+            self.assertEqual(ctx.verify_mode, updater.ssl.CERT_REQUIRED)
+            self.assertTrue(ctx.check_hostname)
+
+    def test_default_paths_present_no_fallback(self):
+        for paths in (FakeVerifyPaths(str(self.ca), None), FakeVerifyPaths(None, str(self.dir))):
+            with self.subTest(paths=paths):
+                ctx = updater._ssl_context(verify_paths=lambda: paths, system="linux", candidates=(str(self.ca),))
+                self.assertFalse(self._has_test_ca(ctx))
+
+    def test_no_bundle_found_logs_error(self):
+        paths = FakeVerifyPaths(None, None)
+        tried = (str(self.missing / "a.pem"), str(self.missing / "b.pem"))
+        with self.assertLogs(updater.log, "ERROR") as logs:
+            ctx = updater._ssl_context(verify_paths=lambda: paths, system="linux", candidates=tried)
+        self.assertIsInstance(ctx, updater.ssl.SSLContext)
+        for path in tried:
+            self.assertIn(path, "\n".join(logs.output))
+
+    def test_broken_bundle_skipped(self):
+        bad = self.dir / "bad.pem"
+        bad.write_text("not a certificate", encoding="ascii")
+        with self.assertLogs(updater.log, "WARNING") as logs:
+            ctx = updater._ssl_context(verify_paths=lambda: FakeVerifyPaths(None, None), system="linux",
+                                       candidates=(str(bad), str(self.ca)))
+        self.assertTrue(self._has_test_ca(ctx))
+        self.assertIn(str(bad), "\n".join(logs.output))
+
+    def test_platform_candidates(self):
+        self.assertEqual(updater.ca_bundle_candidates("darwin"), ("/etc/ssl/cert.pem",))
+        self.assertEqual(updater.ca_bundle_candidates("linux"), (
+            "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem"))
+        self.assertEqual(updater.ca_bundle_candidates("win32"), ())  # Windows uses the system store
+
+    def test_open_uses_fallback_context(self):
+        sentinel = updater.ssl.create_default_context()
+        with mock.patch.object(updater, "_ssl_context", return_value=sentinel) as made, \
+                mock.patch.object(updater.urllib.request, "HTTPSHandler") as handler, \
+                mock.patch.object(updater.urllib.request, "build_opener") as build:
+            updater._open("https://api.github.com/x", 5)
+        made.assert_called_once_with()
+        handler.assert_called_once_with(context=sentinel)
+        build.return_value.open.assert_called_once()
 
 
 class PlumbingTests(unittest.TestCase):
