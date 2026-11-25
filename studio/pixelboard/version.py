@@ -10,8 +10,8 @@ import pathlib
 import re
 import sys
 
-_VERSION_RE = re.compile(r"\d{1,6}\.\d{1,6}\.\d{1,9}")
-_SERIES_RE = re.compile(r"\d+\.\d+")
+_VERSION_RE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,9}")  # ASCII digits only
+_SERIES_RE = re.compile(r"[0-9]+\.[0-9]+")
 FALLBACK_DEV_VERSION = "0.0.0-dev"
 
 

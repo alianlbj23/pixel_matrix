@@ -15,7 +15,8 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(version.parse_version("1.2.57"), (1, 2, 57))
 
     def test_parse_version_rejects(self):
-        for bad in ["v1.2.3", "1.2", "1.2.57-dev", "", "1.2.x", "1.2.3.4", " 1.2.3"]:
+        for bad in ["v1.2.3", "1.2", "1.2.57-dev", "", "1.2.x", "1.2.3.4", " 1.2.3",
+                    "\u0661.\u0662.\u0665\u0668", "1.2.\uff15", "1.2.3\n"]:
             with self.subTest(bad=bad):
                 self.assertIsNone(version.parse_version(bad))
 
