@@ -126,11 +126,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Pinned runner images (not *-latest, which moves to a new OS version without notice); both macOS
+        # builds use macOS 15 so they have the same SDK and minimum system version.
         include:
-          - os: windows-latest
+          - os: windows-2025
             key: windows-x64
             python: "3.10"
-          - os: macos-latest
+          - os: macos-15
             key: macos-arm64
             python: "3.12"
           - os: macos-15-intel
