@@ -1,6 +1,8 @@
 """Entry point of PixelBoard Studio (Windows exe, macOS app, Linux AppImage).
 
 ``--version`` prints the app version and exits without opening a window or a log.
+``--version-file <path>`` writes it to <path> instead (the Windows exe is windowed, so its stdout
+may not reach a shell; CI reads the file).
 """
 import logging
 import os
@@ -71,11 +73,26 @@ def _cleanup_old_update() -> None:
         log.exception("cleaning up the previous version failed")
 
 
+def _write_version_file(args) -> int:
+    """--version-file <path>: 0 written, 2 bad arguments, 1 write failed (reported on stderr, no log yet)."""
+    if len(args) != 1 or not args[0].strip():
+        print("usage: --version-file <path>", file=sys.stderr)
+        return 2
+    try:
+        pathlib.Path(args[0]).write_text(current_version() + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"--version-file: cannot write {args[0]}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv == ["--version"]:
         print(current_version())
         return 0
+    if argv[:1] == ["--version-file"]:
+        return _write_version_file(argv[1:])
     logging.basicConfig(filename=_log_path(), level=logging.INFO, encoding="utf-8",
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     log = logging.getLogger("studio")

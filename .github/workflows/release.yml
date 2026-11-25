@@ -263,14 +263,22 @@ jobs:
             studio/dist/PixelBoard-Studio "$VERSION" \
             "ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.AppImage" "$tools/appimagetool-x86_64.AppImage"
 
-      # --version prints the version and exits before any GUI or logging (run_studio.py).
+      # --version / --version-file print or write the version and exit before any GUI or logging
+      # (run_studio.py).
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 5
         run: |
           set -euo pipefail
-          # Windowed (console=False) exe: stdout may not reach the shell, so only the exit code is checked.
-          "./ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.exe" --version
+          # Windowed (console=False) exe: stdout may not reach the shell, so the version goes to a file.
+          # A relative path means the same file to Git Bash and to the exe.
+          out=ci-out/smoke-version.txt
+          rm -f "$out"
+          "./ci-out/asset/PixelBoard-Studio-$VERSION-$KEY.exe" --version-file "$out"
+          [[ -f "$out" ]] || { echo "::error::--version-file did not write $out"; exit 1; }
+          got="$(tr -d '\r\n' < "$out")"
+          echo "--version-file wrote: $got"
+          [[ "$got" == "$VERSION" ]] || { echo "::error::expected $VERSION, got '$got'"; exit 1; }
 
       - name: Smoke test (macOS)
         if: runner.os == 'macOS'

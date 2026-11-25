@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import os
 import pathlib
 import shutil
@@ -6,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from pixelboard import version
 
@@ -90,6 +93,33 @@ class RunStudioVersionTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(r.stdout.strip(), version.current_version())
             self.assertEqual(list(pathlib.Path(home).iterdir()), [], "--version must not create the log")
+
+    def test_version_file_flag_writes_version_and_exits(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as out_dir:
+            out = pathlib.Path(out_dir) / "ver sion.txt"
+            env = dict(os.environ, HOME=home, XDG_DATA_HOME=home, LOCALAPPDATA=home)
+            r = subprocess.run([sys.executable, str(STUDIO / "run_studio.py"), "--version-file", str(out)],
+                               cwd=str(STUDIO), env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(out.read_text(encoding="utf-8"), version.current_version() + "\n")
+            self.assertEqual(list(pathlib.Path(home).iterdir()), [], "--version-file must not create the log")
+
+    def test_version_file_flag_errors(self):
+        sys.path.insert(0, str(STUDIO))
+        self.addCleanup(sys.path.remove, str(STUDIO))
+        import run_studio
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(run_studio, "_log_path", side_effect=AssertionError("log opened")):
+            for argv, code in ((["--version-file"], 2), (["--version-file", ""], 2),
+                               (["--version-file", "a", "b"], 2),
+                               (["--version-file", str(pathlib.Path(tmp) / "missing" / "v.txt")], 1),
+                               (["--version-file", tmp], 1)):
+                with self.subTest(argv=argv):
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        self.assertEqual(run_studio.main(argv), code)
+                    self.assertIn("--version-file", err.getvalue())
 
 
 @unittest.skipUnless(BASH and sys.platform.startswith("linux"), "build_appimage.sh is a Linux bash script")
