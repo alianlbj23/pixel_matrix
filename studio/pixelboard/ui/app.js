@@ -29,7 +29,7 @@ const isFlashing = () => flashState.phase !== null;
 
 // App update: the prompt is shown at most once per session and deferred while flashing.
 // updating: start_update is running (download + install); every .lockable control is locked meanwhile.
-const updateState = { updating: false, prompted: false, pending: false };
+const updateState = { updating: false, prompted: false, pending: false, cancelling: false };
 const MSG_UPDATING = "正在更新程式，請稍候";
 const MSG_FLASH_LOCKED = "燒錄中，請先停止燒錄";
 const isLocked = () => isFlashing() || updateState.updating;
@@ -84,7 +84,12 @@ window.studio = {
     if (!updateState.updating) return;   // a late callback after start_update already answered
     const f = Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0;
     $("update-progress").value = f;
-    $("update-status").textContent = `下載新版本中… ${Math.round(f * 100)}%`;
+    if (f >= 1) {
+      $("update-cancel").hidden = true;   // installing next: no longer cancellable
+      $("update-status").textContent = "下載完成，正在安裝新版本…";
+    } else if (!updateState.cancelling) {
+      $("update-status").textContent = `下載新版本中… ${Math.round(f * 100)}%`;
+    }
   },
   onFilesDropped(paths) {
     if (isLocked()) { setStatus(lockMessage(), "error"); return; }
@@ -821,8 +826,11 @@ async function runUpdate() {
   if (isLocked()) { setStatus(lockMessage(), "error"); return; }
   if (auditionIndex >= 0) stopAudition();
   updateState.updating = true;
+  updateState.cancelling = false;
   $("update-progress").value = 0;
   $("update-status").textContent = "下載新版本中…";
+  $("update-cancel").hidden = false;
+  $("update-cancel").disabled = false;
   $("update-bar").hidden = false;
   syncControls();
   setStatus("");
@@ -835,13 +843,33 @@ async function runUpdate() {
   if (res && res.ok) {
     $("update-status").textContent = typeof res.message === "string" ? res.message : "正在開啟新版本…";
     $("update-progress").value = 1;
+    $("update-cancel").hidden = true;
     return;   // stays locked until the window closes
   }
   updateState.updating = false;
+  updateState.cancelling = false;
   $("update-bar").hidden = true;
   syncControls();
   requestPreview();
-  if (res) setStatus(res.message, res.installed === true ? "ok" : "error");
+  if (res) setStatus(res.message, res.installed === true ? "ok" : res.cancelled === true ? "" : "error");
+}
+
+// 取消 in the update bar: stops the download; start_update() then answers {cancelled: true}.
+async function cancelUpdate() {
+  if (!updateState.updating || updateState.cancelling) return;
+  updateState.cancelling = true;
+  $("update-cancel").disabled = true;
+  $("update-status").textContent = "正在取消更新…";
+  let res = null;
+  try {
+    res = await api().cancel_update();
+  } catch (err) {
+    reportError("cancel_update", err);
+  }
+  if (res && res.ok) return;
+  updateState.cancelling = false;   // too late (installing) or failed: the update goes on
+  $("update-cancel").hidden = true;
+  if (res && typeof res.message === "string") $("update-status").textContent = res.message;
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +882,7 @@ window.addEventListener("pywebviewready", async () => {
   $("pick-mp3").addEventListener("click", () => pick("mp3"));
   $("flash").addEventListener("click", () => runFlash(false));
   $("stop").addEventListener("click", stopFlash);
+  $("update-cancel").addEventListener("click", cancelUpdate);
   try {
     const arr = await api().get_arrangement();
     if (!acceptArrangement(arr)) setStatus("無法讀取面板排列，先用 1 塊面板", "error");

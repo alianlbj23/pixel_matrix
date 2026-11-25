@@ -198,3 +198,4 @@ body.flashing .lockable, body.updating .lockable { opacity: 0.4; pointer-events:
 .update-bar[hidden] { display: none; }
 .update-bar progress { flex: 1; }
 #update-status { white-space: nowrap; }
+#update-cancel[hidden] { display: none; }

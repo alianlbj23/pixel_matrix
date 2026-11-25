@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +58,7 @@ MSG_NO_PERMISSION = "沒有權限更新程式所在的資料夾，已打開下�
 MSG_NO_PERMISSION_NO_BROWSER = f"沒有權限更新程式所在的資料夾，請到 {RELEASES_URL} 手動下載新版"
 MSG_INSTALL = "無法替換程式檔案"
 MSG_RESTART = "無法自動重新開啟程式；新版本會在下次開啟時生效"
+MSG_CANCELLED = "已取消更新"
 
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 _KEY_RE = re.compile(r"[a-z0-9_-]{1,32}")
@@ -316,13 +318,19 @@ def _remove_file(path) -> None:
         log.warning("could not remove %s: %s", path, exc)
 
 
+def _check_cancel(cancel, name: str) -> None:
+    if cancel is not None and cancel.is_set():
+        raise UpdateError(MSG_CANCELLED, f"download of {name} cancelled by the user")
+
+
 def download(asset: Asset, dest_dir: Path, open_stream: Callable, progress: Callable[[float], None],
-             chunk: int = 1 << 16) -> Path:
+             chunk: int = 1 << 16, cancel: Optional[threading.Event] = None) -> Path:
     """Streams `asset` into dest_dir/<name>, verifying exact size and SHA-256.
 
     On any failure the partial file is deleted (an existing file of the same name is left
     alone) and UpdateError is raised: integrity problems -> MSG_CORRUPT, local file errors ->
-    MSG_DISK, network errors -> MSG_NETWORK.
+    MSG_DISK, network errors -> MSG_NETWORK. `cancel` (set from another thread) is checked
+    before connecting and between chunks -> MSG_CANCELLED.
     """
     if not _is_basename(asset.name) or not _is_int(asset.size) or not 1 <= asset.size <= MAX_SIZE \
             or not isinstance(asset.sha256, str) or not _SHA_RE.fullmatch(asset.sha256):
@@ -340,20 +348,23 @@ def download(asset: Asset, dest_dir: Path, open_stream: Callable, progress: Call
         digest = hashlib.sha256()
         total = 0
         progress(0.0)
-        with os.fdopen(fd, "wb") as out, open_stream(asset.url, DOWNLOAD_TIMEOUT) as stream:
-            while True:
-                block = stream.read(chunk)
-                if not block:
-                    break
-                total += len(block)
-                if total > asset.size:
-                    raise UpdateError(MSG_CORRUPT, f"{asset.name}: more than the declared {asset.size} bytes")
-                digest.update(block)
-                try:
-                    out.write(block)
-                except OSError as exc:
-                    raise UpdateError(MSG_DISK, f"writing {tmp} failed: {exc}") from exc
-                progress(total / asset.size)
+        with os.fdopen(fd, "wb") as out:
+            _check_cancel(cancel, asset.name)
+            with open_stream(asset.url, DOWNLOAD_TIMEOUT) as stream:
+                while True:
+                    _check_cancel(cancel, asset.name)
+                    block = stream.read(chunk)
+                    if not block:
+                        break
+                    total += len(block)
+                    if total > asset.size:
+                        raise UpdateError(MSG_CORRUPT, f"{asset.name}: more than the declared {asset.size} bytes")
+                    digest.update(block)
+                    try:
+                        out.write(block)
+                    except OSError as exc:
+                        raise UpdateError(MSG_DISK, f"writing {tmp} failed: {exc}") from exc
+                    progress(total / asset.size)
         if total != asset.size:
             raise UpdateError(MSG_CORRUPT, f"{asset.name}: got {total} of {asset.size} bytes")
         if digest.hexdigest() != asset.sha256:
@@ -366,7 +377,10 @@ def download(asset: Asset, dest_dir: Path, open_stream: Callable, progress: Call
         log.info("downloaded and verified %s (%d bytes)", asset.name, total)
         return final
     except UpdateError as exc:
-        log.warning("download failed: %s", exc)
+        if exc.user_message == MSG_CANCELLED:
+            log.info("download stopped: %s", exc)
+        else:
+            log.warning("download failed: %s", exc)
         raise
     except (OSError, http.client.HTTPException) as exc:
         log.warning("download of %s failed: %s", asset.name, exc)

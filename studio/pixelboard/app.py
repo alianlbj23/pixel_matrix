@@ -9,7 +9,8 @@ From prepare_flash() until confirm/cancel finishes every editing method is locke
 (MSG_LOCKED); stop_flash() may be called from another thread while confirm_flash() writes.
 App updates: check_update() runs the network check once on a background thread; start_update()
 downloads and installs (refused while flashing; while it runs flashing and editing are refused
-with MSG_UPDATING) and quits the window so the new version can start.
+with MSG_UPDATING) and quits the window so the new version can start. cancel_update() (or closing
+the window) stops the download; once installing has started it can no longer be cancelled.
 pywebview calls each API method on its own thread, so shared state is guarded by _state.
 """
 import base64
@@ -59,6 +60,8 @@ MSG_UPDATE_FAILED = "更新失敗：{reason}，你可以繼續使用目前的版
 MSG_NO_UPDATE = "目前沒有可以安裝的新版本"
 MSG_FROM_SOURCE = "目前是從原始碼執行，無法自動更新"
 MSG_UNEXPECTED = "發生未預期的錯誤"
+MSG_NO_UPDATE_RUNNING = "目前沒有進行中的更新"
+MSG_CANNOT_CANCEL = "正在安裝新版本，無法取消"
 UPDATE_CHECK_WAIT_S = 20.0       # check_update() answers "checking" after this; the UI then polls
 UPDATE_PROGRESS_STEP = 0.01      # onUpdateProgress is sent when progress moved >= 1 % ...
 UPDATE_PROGRESS_INTERVAL_S = 0.2  # ... or this long after the last one
@@ -81,8 +84,8 @@ def _default_check(current: str):
     return updater.check(current, updater.http_get)
 
 
-def _default_download(asset, dest_dir, progress):
-    return updater.download(asset, dest_dir, updater.open_stream, progress)
+def _default_download(asset, dest_dir, progress, cancel):
+    return updater.download(asset, dest_dir, updater.open_stream, progress, cancel=cancel)
 
 
 def _default_install(downloaded, key, exe_path):
@@ -186,8 +189,8 @@ class StudioApi:
         self._tracks: list = []   # dicts: name, data, rate, channels
         self._arr = _load_arrangement(self._layout_path)
         self._pending = None      # (flasher, plan) between prepare_flash and confirm_flash
-        # App update. updater_check(current) -> Manifest | None, updater_download(asset, dest_dir, progress)
-        # -> Path, updater_install(downloaded, key, exe_path); the defaults are the real updater functions.
+        # App update. updater_check(current) -> Manifest | None, updater_download(asset, dest_dir, progress,
+        # cancel) -> Path, updater_install(downloaded, key, exe_path); the defaults are the real updater functions.
         self._updater_check = updater_check or _default_check
         self._updater_download = updater_download or _default_download
         self._updater_install = updater_install or _default_install
@@ -199,6 +202,8 @@ class StudioApi:
         self._update_manifest = None   # newer release found by the check (guarded by _state)
         self._update_installed = False  # installed but the new process could not be started
         self._updating = False          # start_update() running: flashing and editing refused
+        self._update_phase = None       # "download" (cancellable) or "install" while _updating
+        self._update_cancel = threading.Event()  # set by cancel_update()/can_close(), read by the download
         self._quitting = False          # update installed, window being destroyed: closing allowed
 
     # ---- progress / UI bridge -------------------------------------------------
@@ -601,7 +606,8 @@ class StudioApi:
 
     def can_close(self) -> bool:
         """Window close requested (pywebview `closing` handler, also run by window.destroy()):
-        False cancels it while flashing or updating (except the update's own quit).
+        False cancels it while flashing or installing an update (except the update's own quit);
+        closing during the download cancels the download and is allowed.
 
         Runs on the GUI thread, so the UI message is sent from a helper thread: evaluate_js
         waits for the GUI thread and would deadlock here.
@@ -610,6 +616,10 @@ class StudioApi:
             if self._flashing:
                 message = MSG_LOCKED
             elif self._updating and not self._quitting:
+                if self._update_phase == "download":
+                    self._update_cancel.set()
+                    log.info("window closing during the update download; download cancelled")
+                    return True
                 message = MSG_UPDATING
             else:
                 return True
@@ -710,6 +720,8 @@ class StudioApi:
             if manifest is None:
                 return _fail(MSG_NO_UPDATE)
             self._updating = True
+            self._update_phase = "download"
+            self._update_cancel.clear()
         tmp = None
         try:
             exe = self._executable()
@@ -721,12 +733,20 @@ class StudioApi:
                 raise updater.UpdateError(updater.MSG_UNSUPPORTED, f"release {manifest.version} has no {key}")
             tmp = pathlib.Path(tempfile.mkdtemp(prefix="pixelboard-update-"))
             log.info("updating %s -> %s (%s)", self._current_version, manifest.version, key)
-            downloaded = self._updater_download(asset, tmp, self._update_progress_sender())
+            downloaded = self._updater_download(asset, tmp, self._update_progress_sender(), self._update_cancel)
+            with self._state:
+                if self._update_cancel.is_set():   # cancelled after the last chunk: nothing replaced yet
+                    raise updater.UpdateError(updater.MSG_CANCELLED, "update cancelled before install")
+                self._update_phase = "install"
             self._updater_install(downloaded, key, exe)
         except updater.UpdateError as exc:
-            log.warning("update failed: %s", exc)
             with self._state:
                 self._updating = False
+                self._update_phase = None
+                if exc.user_message == updater.MSG_CANCELLED:
+                    log.info("update cancelled: %s", exc)
+                    return {"ok": False, "cancelled": True, "message": exc.user_message}
+                log.warning("update failed: %s", exc)
                 if exc.user_message == updater.MSG_RESTART:  # new version is in place; it starts next time
                     self._update_installed = True
                     return {"ok": False, "installed": True, "message": exc.user_message}
@@ -735,6 +755,7 @@ class StudioApi:
             log.exception("update failed unexpectedly")
             with self._state:
                 self._updating = False
+                self._update_phase = None
             return _fail(MSG_UPDATE_FAILED.format(reason=MSG_UNEXPECTED))
         finally:
             if tmp is not None:
@@ -751,8 +772,24 @@ class StudioApi:
             log.exception("could not close the window after the update")
             with self._state:
                 self._updating = self._quitting = False
+                self._update_phase = None
             return {"ok": True, "message": "新版本已安裝，請關閉這個視窗"}
         return {"ok": True, "message": "正在開啟新版本…"}
+
+    def cancel_update(self) -> dict:
+        """Stops a running update download (the partial file is deleted and the old version kept).
+
+        Only effective while downloading; once installing has started the update runs to its end.
+        Deliberately returns at once: start_update() answers {"cancelled": True} shortly after.
+        """
+        with self._state:
+            if not self._updating:
+                return _fail(MSG_NO_UPDATE_RUNNING)
+            if self._update_phase != "download":
+                return _fail(MSG_CANNOT_CANCEL)
+            self._update_cancel.set()
+        log.info("update download cancel requested")
+        return {"ok": True}
 
     def _quit(self) -> None:
         """Closes the window (ends webview.start() and the process) after a successful update."""

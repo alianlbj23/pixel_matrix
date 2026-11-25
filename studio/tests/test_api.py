@@ -698,8 +698,10 @@ class FakeUpdater:
         self.manifest = manifest
         self.check_calls, self.check_threads, self.downloads, self.installs = [], [], [], []
         self.check_error = self.download_error = self.install_error = None
-        self.gate = None
+        self.gate = self.install_gate = None
         self.started = threading.Event()
+        self.installing = threading.Event()
+        self.cancels = []
 
     def check(self, current):
         self.check_calls.append(current)
@@ -708,12 +710,17 @@ class FakeUpdater:
             raise self.check_error
         return self.manifest
 
-    def download(self, asset, dest_dir, progress):
+    def download(self, asset, dest_dir, progress, cancel):
+        self.cancels.append(cancel)
         self.started.set()
         for f in (0.0, 0.001, 0.002, 0.5, 0.505, 1.0):
             progress(f)
         if self.gate is not None:
-            self.gate.wait(5)
+            deadline = time.monotonic() + 5
+            while not self.gate.is_set() and not cancel.is_set() and time.monotonic() < deadline:
+                time.sleep(0.005)
+        if cancel.is_set():
+            raise updater.UpdateError(updater.MSG_CANCELLED, "cancelled")
         if self.download_error:
             raise self.download_error
         path = pathlib.Path(dest_dir) / asset.name
@@ -723,6 +730,9 @@ class FakeUpdater:
 
     def install(self, downloaded, key, exe_path):
         self.installs.append((pathlib.Path(downloaded).read_bytes(), key, exe_path))
+        self.installing.set()
+        if self.install_gate is not None:
+            self.install_gate.wait(5)
         if self.install_error:
             raise self.install_error
 
@@ -802,12 +812,12 @@ class UpdateApiTest(ApiTestCase):
         mp3 = self.write("a.mp3", fx.stereo_44k(3))
         self.api.add_tracks([mp3, mp3])
         self.api.check_update()
-        self.fake.gate = threading.Event()
+        self.fake.install_gate = threading.Event()
         result = {}
         worker = threading.Thread(target=lambda: result.update(self.api.start_update()))
         worker.start()
         try:
-            self.assertTrue(self.fake.started.wait(2))
+            self.assertTrue(self.fake.installing.wait(2))
             busy = {"ok": False, "message": MSG_UPDATING}
             self.assertEqual(MSG_UPDATING, "正在更新程式，請稍候")
             self.assertEqual(self.api.prepare_flash(PLACEMENT, None), busy)
@@ -836,10 +846,119 @@ class UpdateApiTest(ApiTestCase):
             self.assertIn(f"window.studio.onCloseBlocked({json.dumps(MSG_UPDATING)})",
                           self.window.wait_js(len(self.progress_js()) + 1))
         finally:
-            self.fake.gate.set()
+            self.fake.install_gate.set()
             worker.join(5)
         self.assertTrue(result["ok"])
         self.api._quit.assert_called_once_with()
+
+    def _start_update_in_thread(self, api=None):
+        api = api or self.api
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(api.start_update()))
+        worker.start()
+        return worker, result
+
+    def test_cancel_update_during_download(self):
+        """Real updater.download with a stream that keeps delivering until the user cancels."""
+        payload = b"0123456789" * 50
+        asset = NEW_ASSET._replace(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+        reading = threading.Event()
+        seen = {}
+
+        class SlowStream:
+            def __init__(self):
+                self.pos = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n):
+                reading.set()
+                time.sleep(0.01)
+                block = payload[self.pos:self.pos + min(n, 1)]
+                self.pos += len(block)
+                return block
+
+        def download(asset_, dest_dir, progress, cancel):
+            seen["dir"] = pathlib.Path(dest_dir)
+            return updater.download(asset, dest_dir, lambda url, timeout: SlowStream(), progress, chunk=1,
+                                    cancel=cancel)
+
+        api = self.update_api(updater_download=download)
+        api._window = self.window
+        api.check_update()
+        worker, result = self._start_update_in_thread(api)
+        try:
+            self.assertTrue(reading.wait(2))
+            self.assertTrue(api.get_update_state()["updating"])
+            with self.assertLogs("pixelboard.app", "INFO"):
+                self.assertEqual(api.cancel_update(), {"ok": True})
+        finally:
+            worker.join(5)
+        self.assertEqual(result, {"ok": False, "cancelled": True, "message": "已取消更新"})
+        self.assertFalse(seen["dir"].exists())   # partial download and its folder are gone
+        self.assertEqual(self.fake.installs, [])
+        api._quit.assert_not_called()
+        state = api.get_update_state()
+        self.assertEqual((state["updating"], state["available"]), (False, True))   # unlocked, can retry
+        self.assertNotEqual(api.render_preview(PLACEMENT).get("message"), app_module.MSG_UPDATING)
+        self.assertTrue(api.can_close())
+        api._updater_download = self.fake.download
+        self.assertTrue(api.start_update()["ok"])   # a new attempt is not cancelled by the old request
+        self.assertFalse(self.fake.cancels[-1].is_set())
+
+    def test_can_close_during_download_cancels_it(self):
+        self.api.check_update()
+        self.fake.gate = threading.Event()
+        worker, result = self._start_update_in_thread()
+        try:
+            self.assertTrue(self.fake.started.wait(2))
+            with self.assertLogs("pixelboard.app", "INFO"):
+                self.assertTrue(self.api.can_close())
+        finally:
+            worker.join(5)
+            self.fake.gate.set()
+        self.assertEqual(result, {"ok": False, "cancelled": True, "message": "已取消更新"})
+        self.assertTrue(self.fake.cancels[0].is_set())
+        self.assertEqual(self.fake.installs, [])
+        self.assertNotIn("onCloseBlocked", "".join(self.window.js))
+
+    def test_install_phase_cannot_be_cancelled_or_closed(self):
+        self.api.check_update()
+        self.fake.install_gate = threading.Event()
+        worker, result = self._start_update_in_thread()
+        try:
+            self.assertTrue(self.fake.installing.wait(2))
+            res = self.api.cancel_update()
+            self.assertEqual(res, {"ok": False, "message": "正在安裝新版本，無法取消"})
+            with self.assertLogs("pixelboard.app", "INFO"):
+                self.assertFalse(self.api.can_close())
+            self.assertFalse(self.fake.cancels[0].is_set())
+        finally:
+            self.fake.install_gate.set()
+            worker.join(5)
+        self.assertTrue(result["ok"])
+        self.api._quit.assert_called_once_with()
+
+    def test_cancel_update_when_idle(self):
+        self.assertEqual(self.api.cancel_update(), {"ok": False, "message": "目前沒有進行中的更新"})
+
+    def test_cancel_after_download_before_install(self):
+        """A cancel that arrives after the last chunk still stops before anything is replaced."""
+        def download(asset, dest_dir, progress, cancel):
+            path = self.fake.download(asset, dest_dir, progress, cancel)
+            self.assertEqual(self.api.cancel_update(), {"ok": True})
+            return path
+
+        self.api._updater_download = download
+        self.api.check_update()
+        with self.assertLogs("pixelboard.app", "INFO"):
+            res = self.api.start_update()
+        self.assertEqual(res, {"ok": False, "cancelled": True, "message": "已取消更新"})
+        self.assertEqual(self.fake.installs, [])
 
     def test_update_failure_message_and_unlock(self):
         self.api.open_gif(str(self.gif))
@@ -883,11 +1002,11 @@ class UpdateApiTest(ApiTestCase):
         api = self.update_api()
         api._window = self.window
 
-        def download(asset, dest_dir, progress):
+        def download(asset, dest_dir, progress, cancel):
             for fraction, step in ((0.1, 0), (0.101, 0.25), (0.102, 0.05), (0.103, 0.2), (0.104, 0)):
                 progress(fraction)  # sent: first, after 200 ms, else dropped (< 1 % change)
                 self.clock.now += step
-            return self.fake.download(asset, dest_dir, lambda f: None)
+            return self.fake.download(asset, dest_dir, lambda f: None, cancel)
 
         api._updater_download = download
         api.check_update()

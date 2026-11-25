@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 import zipfile
@@ -350,6 +351,47 @@ class DownloadTests(unittest.TestCase):
                                      lambda f: None)
             self.assertIn("磁碟", ctx.exception.user_message)
             self.assertEqual(os.listdir(self.dest), [])
+
+    def test_download_cancel_mid_download_cleans_up(self):
+        payload = b"c" * 100
+        cancel = threading.Event()
+        streams, read_up_to = [], []
+
+        class CancellingStream(Stream):
+            def read(self, n=-1):
+                if self.tell() >= 30:
+                    cancel.set()  # the user presses 取消 while chunks are arriving
+                data = super().read(n)
+                read_up_to.append(self.tell())
+                return data
+
+        def open_stream(url, timeout):
+            streams.append(CancellingStream(payload))
+            return streams[-1]
+
+        with self.assertLogs(updater.log, "INFO"):
+            with self.assertRaises(updater.UpdateError) as ctx:
+                updater.download(asset_for(payload), self.dest, open_stream, lambda f: None, chunk=10, cancel=cancel)
+        self.assertEqual(ctx.exception.user_message, "已取消更新")
+        self.assertEqual(updater.MSG_CANCELLED, "已取消更新")
+        self.assertEqual(os.listdir(self.dest), [])   # the partial file is deleted
+        self.assertTrue(streams[0].closed)
+        self.assertEqual(read_up_to[-1], 40)   # stopped at the next chunk boundary, not read to the end
+
+    def test_download_cancelled_before_start(self):
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertLogs(updater.log, "INFO"):
+            with self.assertRaises(updater.UpdateError) as ctx:
+                updater.download(asset_for(b"x" * 10), self.dest, must_not_call, lambda f: None, cancel=cancel)
+        self.assertEqual(ctx.exception.user_message, updater.MSG_CANCELLED)
+        self.assertEqual(os.listdir(self.dest), [])
+
+    def test_download_not_cancelled_completes(self):
+        payload = b"k" * 50
+        path = updater.download(asset_for(payload), self.dest, lambda url, timeout: Stream(payload), lambda f: None,
+                                chunk=10, cancel=threading.Event())
+        self.assertEqual(path.read_bytes(), payload)
 
     def test_download_rejects_bad_asset(self):
         payload = b"z" * 10
